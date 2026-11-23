@@ -1,0 +1,144 @@
+name: Validate upstream frontend port
+
+# Fork-only validation. Deployment continues to use the installed-base artifact.
+on:
+  push:
+    branches:
+      - ci/ma-frontend-static-artifact
+    paths:
+      - .github/workflows/frontend-upstream-validation.yml
+  workflow_dispatch:
+
+concurrency:
+  group: upstream-frontend-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22.x"
+  PYTHON_VERSION: "3.12"
+  SOURCE_SHA: "8c5b234d8c60d83bd31f83347c6481f97dc971f9"
+  BASE_SOURCE_SHA: "1514734b4c4517a63a195088b63789af16692f3a"
+  SOURCE_PACKAGE_VERSION: "0.0.0"
+
+jobs:
+  test:
+    name: Test (shard ${{ matrix.shard }}/4)
+    if: github.repository == 'alex-mextner/music-assistant-frontend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-frontend
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Run tests
+        run: pnpm test:run --shard=${{ matrix.shard }}/4
+        env:
+          CI: true
+
+  lint:
+    name: Lint
+    if: github.repository == 'alex-mextner/music-assistant-frontend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-frontend
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Lint
+        run: pnpm lint:check
+        env:
+          CI: true
+
+  build:
+    name: Build
+    if: github.repository == 'alex-mextner/music-assistant-frontend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          fetch-depth: 3
+          persist-credentials: false
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Verify and record source provenance
+        shell: python
+        run: |
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import tomllib
+
+          source = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          base = subprocess.check_output(["git", "rev-parse", "HEAD~2"], text=True).strip()
+          version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+          assert source == os.environ["SOURCE_SHA"]
+          assert base == os.environ["BASE_SOURCE_SHA"]
+          assert version == os.environ["SOURCE_PACKAGE_VERSION"]
+          receipt = json.dumps({
+              "source_sha": source,
+              "base_source_sha": base,
+              "source_package_version": version,
+              "deployment_artifact": False,
+          }, indent=2)
+          print(receipt)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("Validated upstream source:\n\n" + receipt + "\n")
+
+      - uses: ./.github/actions/setup-frontend
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Python build tools
+        run: python3 -m pip install build
+
+      - name: Build
+        run: pnpm build
+        env:
+          CI: true
+
+      - name: Build Python package
+        run: python3 -m build
+
+      - name: Verify the Python package ships the frontend
+        run: .github/scripts/verify-python-package.sh
+
+      - name: Verify tracked source stayed unchanged
+        run: git diff --exit-code HEAD
+
+  test-and-lint:
+    name: Test and Lint
+    runs-on: ubuntu-latest
+    needs: [test, lint, build]
+    if: ${{ !cancelled() && github.repository == 'alex-mextner/music-assistant-frontend' }}
+    steps:
+      - name: Check job results
+        run: |
+          [ "${{ needs.test.result }}" = "success" ] &&
+          [ "${{ needs.lint.result }}" = "success" ] &&
+          [ "${{ needs.build.result }}" = "success" ]
