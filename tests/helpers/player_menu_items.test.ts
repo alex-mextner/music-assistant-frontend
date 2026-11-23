@@ -1083,6 +1083,30 @@ describe("transfer queue", () => {
     );
   });
 
+  it("keeps selection when a group handoff starts during audio unlock", async () => {
+    vi.mocked(api.queueCommandTransfer).mockClear();
+    storeMock.activePlayerId = "kitchen";
+    let unlock!: (ready: boolean) => void;
+    webPlayerMock.unlockAudio.mockReturnValueOnce(
+      new Promise<boolean>((resolve) => {
+        unlock = resolve;
+      }),
+    );
+    const [device] = transferItems([
+      target({ player_id: "this_browser", hide_in_ui: true, private: true }),
+    ]);
+    const action = Promise.resolve(device.action?.());
+    pendingGroupTransfers.set("this_browser", Symbol("handoff"));
+    unlock(true);
+    try {
+      await action;
+      expect(api.queueCommandTransfer).not.toHaveBeenCalled();
+      expect(storeMock.activePlayerId).toBe("kitchen");
+    } finally {
+      pendingGroupTransfers.clear();
+    }
+  });
+
   it("keeps the queue when this tab cannot play audio", async () => {
     const { toast } = await import("vue-sonner");
     vi.mocked(api.queueCommandTransfer).mockClear();
@@ -1164,14 +1188,17 @@ describe("queue transfer menu during a group handoff", () => {
 
   it.each(["kitchen", "other"])(
     "keeps selection unchanged while the %s endpoint is reserved",
-    (reserved) => {
+    async (reserved) => {
       vi.mocked(api.queueCommandTransfer).mockClear();
       storeMock.activePlayerId = "kitchen";
       const source = makePlayer();
       api.players.other = makePlayer({
         player_id: "other",
         name: "Office",
+        enabled: true,
         available: true,
+        output_protocols: [],
+        group_members: [],
         synced_to: null,
         hide_in_ui: false,
         private: false,
@@ -1179,15 +1206,16 @@ describe("queue transfer menu during a group handoff", () => {
       const item = getPlayerMenuItems(
         source,
         makeQueue({ active: true, items: 1 }),
+        { context: "queue" },
       ).find((entry) => entry.label === "transfer_queue")?.subItems?.[0];
       expect(item).toBeDefined();
       pendingGroupTransfers.set(reserved, Symbol("handoff"));
-      item?.action?.();
+      await Promise.resolve(item?.action?.());
       expect(api.queueCommandTransfer).not.toHaveBeenCalled();
       expect(storeMock.activePlayerId).toBe("kitchen");
 
       pendingGroupTransfers.clear();
-      item?.action?.();
+      await Promise.resolve(item?.action?.());
       expect(api.queueCommandTransfer).toHaveBeenCalledExactlyOnceWith(
         "kitchen",
         "other",
