@@ -22,6 +22,7 @@ vi.mock("@/plugins/api", async () => {
   const api = reactive({
     players: {} as Record<string, Player>,
     queues: {} as Record<string, PlayerQueue>,
+    queueElapsedTime: {} as MusicAssistantApi["queueElapsedTime"],
     getPlayer: vi.fn<MusicAssistantApi["getPlayer"]>(),
     getPlayerQueues: vi.fn<MusicAssistantApi["getPlayerQueues"]>(),
     playerCommandSetMembers:
@@ -131,6 +132,7 @@ function mountPlayerControls(grouped = true) {
     active_source: grouped ? "leader" : "child",
   });
   api.players = { leader, child };
+  api.queueElapsedTime = {};
   api.queues = {
     leader: playerQueue({
       queue_id: "leader",
@@ -274,6 +276,36 @@ describe("changing the idle group playback target", () => {
     await wrapper.get(".play-btn-icon").trigger("click");
 
     expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith("child");
+  });
+
+  it("reconciles stale progress from the final queue snapshot", async () => {
+    const { wrapper } = mountPlayerControls();
+    api.queueElapsedTime = {
+      leader: { elapsed_time: 42, elapsed_time_last_updated: 1000 },
+      child: { elapsed_time: 9, elapsed_time_last_updated: 900 },
+      unrelated: { elapsed_time: 12, elapsed_time_last_updated: 1100 },
+    };
+    vi.mocked(api.getPlayerQueues).mockResolvedValue([
+      playerQueue({
+        queue_id: "leader",
+        elapsed_time: 0,
+        elapsed_time_last_updated: 1200,
+      }),
+      playerQueue({
+        ...api.queues.leader,
+        queue_id: "child",
+        elapsed_time_last_updated: 1200,
+      }),
+    ]);
+
+    await removeLeader(wrapper);
+
+    expect(api.queues.child.current_index).toBe(6);
+    expect(api.queueElapsedTime).toEqual({
+      leader: { elapsed_time: 0, elapsed_time_last_updated: 1200 },
+      child: { elapsed_time: 42, elapsed_time_last_updated: 1200 },
+      unrelated: { elapsed_time: 12, elapsed_time_last_updated: 1100 },
+    });
   });
 
   it("blocks Play from the checkbox click until the server acknowledges the transfer", async () => {

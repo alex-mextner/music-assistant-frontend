@@ -132,6 +132,10 @@ async function refreshTransferState(playerIds: string[]): Promise<void> {
       for (const queue of await api.getPlayerQueues()) {
         if (playerIds.includes(queue.queue_id)) {
           api.queues[queue.queue_id] = queue;
+          api.queueElapsedTime[queue.queue_id] = {
+            elapsed_time: queue.elapsed_time,
+            elapsed_time_last_updated: queue.elapsed_time_last_updated,
+          };
         }
       }
     })(),
