@@ -19,6 +19,9 @@ const PLAYBACK_COMMANDS = new Set([
   "play_index",
   "seek",
   "skip",
+  // Queue edits can invalidate the stopped source snapshot before its move.
+  "clear",
+  "delete_item",
 ]);
 
 export function isGroupPlaybackBlocked(
