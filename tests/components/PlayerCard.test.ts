@@ -1,4 +1,6 @@
 import PlayerCard from "@/components/PlayerCard.vue";
+import { pendingGroupTransfers } from "@/helpers/player_group_members";
+import { nextTick } from "vue";
 import {
   IdentifierType,
   MediaType,
@@ -11,7 +13,7 @@ import {
 import type { MusicAssistantApi } from "@/plugins/api";
 import { store } from "@/plugins/store";
 import { mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { apiMock, emitContextMenu } = vi.hoisted(() => ({
   apiMock: {
@@ -247,6 +249,30 @@ describe("PlayerCard", () => {
     apiMock.players = {};
     apiMock.queues = {};
     store.deviceType = "desktop";
+  });
+
+  afterEach(() => pendingGroupTransfers.clear());
+
+  it("blocks card Play until an affected group handoff finishes", async () => {
+    apiMock.playerCommandPlayPause.mockClear();
+    const player = createPlayer();
+    const wrapper = mountPlayerCard(player);
+    const play = wrapper.get('[aria-label="play"]');
+    pendingGroupTransfers.set(player.player_id, Symbol("handoff"));
+    await nextTick();
+
+    expect(play.attributes("disabled")).toBeDefined();
+    expect(wrapper.find(".spinner").exists()).toBe(true);
+    await play.trigger("click");
+    expect(apiMock.playerCommandPlayPause).not.toHaveBeenCalled();
+
+    pendingGroupTransfers.clear();
+    await nextTick();
+    await play.trigger("click");
+    expect(apiMock.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith(
+      player.player_id,
+    );
+    wrapper.unmount();
   });
 
   it("uses a primary border for the active player", () => {

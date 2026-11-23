@@ -147,7 +147,8 @@ function mountPlayerControls(grouped = true) {
         const members = computed(() =>
           [player.value.player_id, ...player.value.group_members]
             .filter((id, index, ids) => ids.indexOf(id) === index)
-            .map((id) => api.players[id]),
+            .map((id) => api.players[id])
+            .filter((member) => member?.available),
         );
         return { player, queue, members };
       },
@@ -254,6 +255,33 @@ describe("changing the idle group playback target", () => {
     expect(store.activePlayerId).toBe("child");
     await wrapper.get(".play-btn-icon").trigger("click");
     expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith("child");
+  });
+
+  it("keeps the last available member checked when an offline member remains", async () => {
+    const { wrapper, leader } = mountPlayerControls();
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Garage",
+      available: false,
+      synced_to: "leader",
+    });
+    leader.group_members.push("other");
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Office"]').trigger("click");
+    const lastMember = wrapper.get('[aria-label="Kitchen"]');
+    expect(lastMember.attributes("disabled")).toBeDefined();
+    await lastMember.trigger("click");
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+      "leader",
+      undefined,
+      ["child"],
+    );
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(store.activePlayerId).toBe("leader");
   });
 
   it("preserves a new destination selected in the same debounce interval", async () => {
