@@ -35,6 +35,7 @@ defineOptions({ inheritAttrs: false });
 import Icon, { IconProps } from "@/components/Icon.vue";
 import { useActiveAudioSource } from "@/composables/activeAudioSource";
 import { useActiveSource } from "@/composables/activeSource";
+import { pendingGroupTransfers } from "@/helpers/player_group_members";
 import api from "@/plugins/api";
 import {
   MediaType,
@@ -109,6 +110,7 @@ const isPlaying = computed(() => {
 const isLoading = computed(() => {
   if (!compProps.player) return false;
   return (
+    pendingGroupTransfers.has(compProps.player.player_id) ||
     compProps.playerQueue?.extra_attributes?.play_action_in_progress === true
   );
 });
@@ -121,7 +123,7 @@ const isDisabled = computed(() => {
 });
 
 const onClick = () => {
-  if (!compProps.player) return;
+  if (!compProps.player || isLoading.value) return;
   if (isPlaying.value && showStop.value) {
     api.playerCommandStop(compProps.player.player_id);
   } else {

@@ -13,6 +13,7 @@ import { store } from "@/plugins/store";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computed, defineComponent } from "vue";
+import { toast } from "vue-sonner";
 import { playerQueue } from "../fixtures/playerQueue";
 
 vi.mock("@/plugins/api", async () => {
@@ -33,12 +34,17 @@ vi.mock("@/plugins/api", async () => {
 
 vi.mock("@/plugins/store", async () => {
   const { reactive } = await vi.importActual<typeof import("vue")>("vue");
-  return { store: reactive({ activePlayerId: undefined as string | undefined }) };
+  return {
+    store: reactive({ activePlayerId: undefined as string | undefined }),
+  };
 });
 
 vi.mock("@/plugins/web_player", () => ({
   webPlayer: { player_id: null },
 }));
+
+vi.mock("@/plugins/i18n", () => ({ $t: (key: string) => key }));
+vi.mock("vue-sonner", () => ({ toast: { error: vi.fn() } }));
 
 function createPlayer(overrides: Partial<Player> = {}): Player {
   return {
@@ -351,6 +357,125 @@ describe("changing the idle group playback target", () => {
     expect(store.activePlayerId).toBe("child");
     expect(api.getPlayerQueues).toHaveBeenCalled();
     expect(api.playerCommandPlayPause).not.toHaveBeenCalled();
+  });
+
+  it("keeps a destination reserved when another group tries to transfer to it", async () => {
+    const { wrapper } = mountPlayerControls();
+    const transfer = deferred();
+    vi.mocked(api.sendCommand).mockReturnValue(transfer.promise);
+    await removeLeader(wrapper);
+
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom",
+      active_source: "other",
+      group_members: ["other", "child"],
+    });
+    api.queues.other = playerQueue({ queue_id: "other", items: 2 });
+    store.activePlayerId = "other";
+    await flushPromises();
+    await wrapper.get('[aria-label="Bedroom"]').trigger("click");
+    await flushPromises();
+
+    expect(api.sendCommand).toHaveBeenCalledTimes(1);
+    expect(api.queues.other.items).toBe(2);
+    expect(toast.error).toHaveBeenCalledWith(
+      "player_group_playback.change_pending",
+    );
+
+    store.activePlayerId = "child";
+    await flushPromises();
+    await wrapper.get(".play-btn-icon").trigger("click");
+    expect(api.playerCommandPlayPause).not.toHaveBeenCalled();
+
+    acknowledgeTransfer();
+    transfer.resolve();
+    await flushPromises();
+    await wrapper.get(".play-btn-icon").trigger("click");
+    expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith("child");
+  });
+
+  it("lets a different room change its group while a handoff is pending", async () => {
+    const { wrapper } = mountPlayerControls();
+    const transfer = deferred();
+    vi.mocked(api.sendCommand).mockReturnValue(transfer.promise);
+    await removeLeader(wrapper);
+
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom",
+      active_source: "other",
+      can_group_with: ["fourth"],
+    });
+    api.players.fourth = createPlayer({
+      player_id: "fourth",
+      name: "Den",
+      active_source: "fourth",
+    });
+    api.queues.other = playerQueue({ queue_id: "other", items: 2 });
+    store.activePlayerId = "other";
+    await flushPromises();
+    await wrapper.get('[aria-label="Den"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(api.playerCommandSetMembers).toHaveBeenCalledWith(
+      "other",
+      ["fourth"],
+      undefined,
+    );
+    expect(api.sendCommand).toHaveBeenCalledTimes(1);
+    transfer.resolve();
+  });
+
+  it("retains a queued addition when an earlier server snapshot replaces the player", async () => {
+    const { wrapper } = mountPlayerControls(false);
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom",
+      active_source: "other",
+    });
+    const joining = deferred();
+    vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(joining.promise);
+    vi.mocked(api.sendCommand).mockImplementation(async () => {
+      acknowledgeTransfer();
+    });
+
+    await wrapper.get('[aria-label="Office"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(500);
+    await wrapper.get('[aria-label="Bedroom"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(500);
+    api.players.leader = {
+      ...api.players.leader,
+      group_members: ["leader", "child"],
+    };
+    await flushPromises();
+    await removeLeader(wrapper);
+    joining.resolve();
+    await flushPromises();
+
+    expect(api.playerCommandSetMembers).toHaveBeenLastCalledWith("child", [
+      "other",
+    ]);
+    expect(store.activePlayerId).toBe("child");
+  });
+
+  it("preserves playback started while detaching the old group", async () => {
+    const { wrapper } = mountPlayerControls();
+    const detaching = deferred();
+    vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(
+      detaching.promise,
+    );
+    await removeLeader(wrapper);
+    api.players.leader.playback_state = PlaybackState.PLAYING;
+    api.queues.leader.state = PlaybackState.PLAYING;
+    detaching.resolve();
+    await flushPromises();
+
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(store.activePlayerId).toBe("leader");
+    expect(toast.error).toHaveBeenCalledWith(
+      "player_group_playback.source_changed",
+    );
   });
 
   it.each([PlayerType.DISPLAY, PlayerType.VISUALIZER, PlayerType.LIGHT])(
