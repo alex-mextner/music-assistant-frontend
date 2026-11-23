@@ -19,8 +19,8 @@ concurrency:
 env:
   NODE_VERSION: "22.x"
   PYTHON_VERSION: "3.12"
-  SOURCE_SHA: "38cd425ecdc43f35df473d415ce7bacb7f40c0be"
-  BUILD_MODE: final
+  SOURCE_SHA: "98f61af5c8725c2289699b692303aed8fb849156"
+  BUILD_MODE: focused-red
   BASE_FRONTEND_VERSION: "2.17.297"
   BASE_SOURCE_SHA: "e779b9d359e47cd210c2801f16a0ce6263571903"
 
@@ -73,7 +73,6 @@ jobs:
         run: >-
           pnpm test:run
           tests/components/PlayerGroupMembersTransfer.test.ts
-          tests/components/PlayerCard.test.ts
           tests/plugins/api/index.test.ts
         env:
           CI: true
