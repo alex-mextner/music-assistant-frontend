@@ -1181,6 +1181,10 @@ describe("transfer queue", () => {
 });
 
 describe("queue transfer menu during a group handoff", () => {
+  beforeEach(() => {
+    api.players = {};
+  });
+
   afterEach(() => {
     pendingGroupTransfers.clear();
     api.players = {};

@@ -24,7 +24,6 @@ import {
 } from "@/plugins/api/interfaces";
 import { getIngressClientKey } from "@/helpers/ingress";
 import { pendingGroupTransfers } from "@/helpers/player_group_members";
-import { store } from "@/plugins/store";
 import { eventbus, type StreamHeldDialogEvent } from "@/plugins/eventbus";
 import { BaseTransport, TransportState } from "@/plugins/remote/transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,7 +41,10 @@ const { hasScope, mockToastError, mockToastInfo, routerMock, storeMock } =
       currentRoute: { value: { name: "home" as string } },
       push: vi.fn(),
     },
-    storeMock: { showFullscreenPlayer: false },
+    storeMock: {
+      showFullscreenPlayer: false,
+      activePlayer: undefined as Player | undefined,
+    },
   }));
 
 vi.mock("vue-sonner", () => ({
@@ -2122,7 +2124,7 @@ describe("playback commands during a group handoff", () => {
   afterEach(() => {
     api.disconnect();
     pendingGroupTransfers.clear();
-    delete store.activePlayer;
+    storeMock.activePlayer = undefined;
   });
 
   function playbackCommands() {
@@ -2146,6 +2148,7 @@ describe("playback commands during a group handoff", () => {
       transport.receive({
         message_id: command.message_id,
         result: command.command === "time" ? Date.now() / 1000 : null,
+        partial: false,
       });
     }
     await request;
@@ -2208,7 +2211,7 @@ describe("playback commands during a group handoff", () => {
   it("blocks implicit Play on a reserved player while preserving explicit queue routing", async () => {
     pendingGroupTransfers.clear();
     pendingGroupTransfers.set("child", Symbol("handoff"));
-    store.activePlayer = {
+    storeMock.activePlayer = {
       player_id: "child",
       active_source: "foreign",
     } as Player;
