@@ -896,6 +896,50 @@ describe("changing the idle group playback target", () => {
     },
   );
 
+  it("does not detach a removed member that now belongs to another playing room", async () => {
+    mountPlayerControls();
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom speaker",
+      synced_to: "foreign",
+      active_source: "foreign",
+      playback_state: PlaybackState.PLAYING,
+    });
+    api.players.foreign = createPlayer({
+      player_id: "foreign",
+      active_source: "foreign",
+      group_members: ["foreign", "other"],
+      playback_state: PlaybackState.PLAYING,
+    });
+    api.queues.foreign = playerQueue({
+      queue_id: "foreign",
+      items: 11,
+      state: PlaybackState.PLAYING,
+    });
+    api.players.leader.group_members.push("other");
+    vi.mocked(api.sendCommand).mockImplementation(async () =>
+      acknowledgeTransfer(),
+    );
+
+    await setPlayerGroupMembers(
+      "leader",
+      [],
+      ["leader", "other"],
+      ["child"],
+      async () => undefined,
+    );
+
+    expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+      "leader",
+      undefined,
+      ["child"],
+    );
+    expect(api.players.other.synced_to).toBe("foreign");
+    expect(api.queues.foreign.state).toBe(PlaybackState.PLAYING);
+    expect(api.queues.foreign.items).toBe(11);
+    expect(store.activePlayerId).toBe("child");
+  });
+
   it("allows an explicitly selected idle member to leave its previous group", async () => {
     const { wrapper } = mountPlayerControls(false);
     api.players.other = createPlayer({
