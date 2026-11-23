@@ -479,6 +479,34 @@ describe("playback commands during a group handoff", () => {
     },
   );
 
+  it.each(["clear", "delete_item"])(
+    "blocks %s while the handoff still has a stale nonempty queue snapshot",
+    (command) => {
+      api.queues.leader = playerQueue({ queue_id: "leader", items: 1 });
+      const mutate = (queueId: string) => {
+        if (command === "clear") api.queueCommandClear(queueId);
+        else api.queueCommandDelete(queueId, 0);
+      };
+      mutate("leader");
+      expect(playbackCommands()).toEqual([]);
+      expect(api.queues.leader.items).toBe(1);
+
+      mutate("other");
+      expect(playbackCommands()).toEqual([
+        expect.objectContaining({
+          command: "player_queues/" + command,
+          args: expect.objectContaining({ queue_id: "other" }),
+        }),
+      ]);
+      pendingGroupTransfers.clear();
+      mutate("leader");
+      expect(playbackCommands().at(-1)).toMatchObject({
+        command: "player_queues/" + command,
+        args: expect.objectContaining({ queue_id: "leader" }),
+      });
+    },
+  );
+
   it("blocks media-item Play for the reserved queue", async () => {
     await acknowledge(
       api.playMedia("library://track/1", undefined, {

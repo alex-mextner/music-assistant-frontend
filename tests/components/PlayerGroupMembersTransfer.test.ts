@@ -4,6 +4,7 @@ import { api, type MusicAssistantApi } from "@/plugins/api";
 import {
   IdentifierType,
   EventType,
+  MediaType,
   PlaybackState,
   type Player,
   PlayerFeature,
@@ -11,6 +12,11 @@ import {
   PlayerType,
 } from "@/plugins/api/interfaces";
 import { store } from "@/plugins/store";
+import {
+  eventbus,
+  type PlayerGroupPlaybackDialogEvent,
+} from "@/plugins/eventbus";
+import { setPlayerGroupMembers } from "@/helpers/player_group_members";
 import { flushPromises, mount, type VueWrapper } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { computed, defineComponent } from "vue";
@@ -29,6 +35,7 @@ vi.mock("@/plugins/api", async () => {
       vi.fn<MusicAssistantApi["playerCommandSetMembers"]>(),
     playerCommandPlayPause:
       vi.fn<MusicAssistantApi["playerCommandPlayPause"]>(),
+    playerCommandStop: vi.fn<MusicAssistantApi["playerCommandStop"]>(),
     sendCommand: vi.fn<MusicAssistantApi["sendCommand"]>(),
     subscribe_multi: vi.fn<MusicAssistantApi["subscribe_multi"]>(),
   });
@@ -237,6 +244,7 @@ describe("changing the idle group playback target", () => {
       };
     });
     vi.mocked(api.playerCommandPlayPause).mockResolvedValue();
+    vi.mocked(api.playerCommandStop).mockResolvedValue();
     vi.mocked(api.sendCommand).mockResolvedValue(undefined);
     vi.mocked(api.getPlayer).mockImplementation(async (id) => ({
       ...api.players[id],
@@ -276,6 +284,110 @@ describe("changing the idle group playback target", () => {
     await wrapper.get(".play-btn-icon").trigger("click");
 
     expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith("child");
+  });
+
+  it.each([
+    { control: "Pause", state: PlaybackState.PLAYING, stop: false },
+    { control: "Resume", state: PlaybackState.PAUSED, stop: false },
+    { control: "Stop", state: PlaybackState.PLAYING, stop: true },
+  ])(
+    "keeps $control usable during the existing Keep playing handoff",
+    async ({ state, stop }) => {
+      const { wrapper, leader } = mountPlayerControls();
+      leader.playback_state = state;
+      api.queues.leader.state = state;
+      if (stop) {
+        leader.current_media = {
+          uri: "test://radio",
+          media_type: MediaType.RADIO,
+          title: null,
+          artist: null,
+          album: null,
+          image_url: null,
+          palette: null,
+          duration: null,
+          source_id: null,
+          elapsed_time: null,
+          elapsed_time_last_updated: null,
+          queue_item_id: null,
+        };
+      }
+      await flushPromises();
+      const membership = deferred();
+      vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(
+        membership.promise,
+      );
+      const confirmation =
+        vi.fn<(event: PlayerGroupPlaybackDialogEvent) => void>();
+      eventbus.on("playerGroupPlaybackDialog", confirmation);
+      try {
+        await wrapper.get('[aria-label="Kitchen"]').trigger("click");
+      } finally {
+        eventbus.off("playerGroupPlaybackDialog", confirmation);
+      }
+      expect(confirmation).toHaveBeenCalledOnce();
+      const requested = confirmation.mock.calls[0][0].onKeepPlaying();
+      await flushPromises();
+
+      expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+        "leader",
+        undefined,
+        ["leader"],
+      );
+      expect(api.sendCommand).not.toHaveBeenCalled();
+      expect(
+        wrapper.get(".play-btn-icon").attributes("disabled"),
+      ).toBeUndefined();
+      expect(wrapper.find(".play-btn-spinner").exists()).toBe(false);
+      await wrapper.get(".play-btn-icon").trigger("click");
+      if (stop) {
+        expect(api.playerCommandStop).toHaveBeenCalledExactlyOnceWith("leader");
+      } else {
+        expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith(
+          "leader",
+        );
+      }
+      membership.resolve();
+      await requested;
+      await flushPromises();
+    },
+  );
+
+  it("keeps a captured non-idle request on the existing route after an earlier update", async () => {
+    const { leader } = mountPlayerControls(false);
+    leader.playback_state = PlaybackState.PLAYING;
+    api.queues.leader.state = PlaybackState.PLAYING;
+    const joining = deferred();
+    vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(joining.promise);
+    const restore = vi.fn(async () => undefined);
+    const added = setPlayerGroupMembers(
+      "leader",
+      ["child"],
+      [],
+      ["leader", "child"],
+      restore,
+    );
+    const removed = setPlayerGroupMembers(
+      "leader",
+      [],
+      ["leader"],
+      ["child"],
+      restore,
+    );
+    expect(api.playerCommandSetMembers).toHaveBeenCalledTimes(1);
+
+    leader.playback_state = PlaybackState.IDLE;
+    api.queues.leader.state = PlaybackState.IDLE;
+    joining.resolve();
+    await Promise.all([added, removed]);
+
+    expect(api.playerCommandSetMembers).toHaveBeenLastCalledWith(
+      "leader",
+      undefined,
+      ["leader"],
+    );
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(store.activePlayerId).toBe("leader");
   });
 
   it("reconciles stale progress from the final queue snapshot", async () => {
