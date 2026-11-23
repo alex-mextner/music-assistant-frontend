@@ -982,6 +982,7 @@ describe("queue transfer menu during a group handoff", () => {
       api.players.other = makePlayer({
         player_id: "other",
         name: "Office",
+        enabled: true,
         available: true,
         synced_to: null,
         hide_in_ui: false,
