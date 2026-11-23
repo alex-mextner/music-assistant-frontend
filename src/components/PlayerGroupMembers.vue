@@ -332,14 +332,16 @@ function flushPendingMemberUpdate() {
 
 async function restorePlayer(playerId: string) {
   const restoredPlayer = await api.getPlayer(playerId);
-  for (const playerId of playersToAdd.value) {
-    if (!restoredPlayer.group_members.includes(playerId)) {
-      restoredPlayer.group_members.push(playerId);
+  if (playerId === props.player.player_id) {
+    for (const memberId of playersToAdd.value) {
+      if (!restoredPlayer.group_members.includes(memberId)) {
+        restoredPlayer.group_members.push(memberId);
+      }
     }
+    restoredPlayer.group_members = restoredPlayer.group_members.filter(
+      (memberId) => !playersToRemove.value.includes(memberId),
+    );
   }
-  restoredPlayer.group_members = restoredPlayer.group_members.filter(
-    (playerId) => !playersToRemove.value.includes(playerId),
-  );
   api.players[playerId] = restoredPlayer;
 }
 </script>

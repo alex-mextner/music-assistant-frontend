@@ -53,7 +53,10 @@ vi.mock("@/plugins/web_player", () => ({
   webPlayer: { player_id: null },
 }));
 
-vi.mock("@/plugins/i18n", () => ({ $t: (key: string) => key }));
+vi.mock("@/plugins/i18n", () => ({
+  $t: (key: string) => key,
+  i18n: { global: { locale: { value: "en" } } },
+}));
 vi.mock("vue-sonner", () => ({ toast: { error: vi.fn() } }));
 
 function createPlayer(overrides: Partial<Player> = {}): Player {
@@ -133,7 +136,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function mountPlayerControls(grouped = true) {
+function mountPlayerControls(grouped = true, keyed = true) {
   const leader = createPlayer({
     group_members: grouped ? ["leader", "child"] : [],
   });
@@ -167,10 +170,10 @@ function mountPlayerControls(grouped = true) {
             .map((id) => api.players[id])
             .filter((member) => member?.available),
         );
-        return { player, queue, members };
+        return { player, queue, members, keyed };
       },
       template: `
-        <PlayerGroupMembers :key="player.player_id" :player="player" :members="members" />
+        <PlayerGroupMembers :key="keyed ? player.player_id : undefined" :player="player" :members="members" />
         <PlayBtn :player="player" :player-queue="queue" />
       `,
     }),
@@ -827,6 +830,370 @@ describe("changing the idle group playback target", () => {
       expect(store.activePlayerId).toBe("leader");
     },
   );
+
+  it("keeps Pause usable on the different leader of an intersecting request", async () => {
+    const { wrapper } = mountPlayerControls();
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom",
+      active_source: "other",
+      playback_state: PlaybackState.PLAYING,
+    });
+    api.queues.other = playerQueue({
+      queue_id: "other",
+      items: 2,
+      state: PlaybackState.PLAYING,
+    });
+    const joining = deferred();
+    vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(joining.promise);
+    const earlier = setPlayerGroupMembers(
+      "other",
+      ["child"],
+      [],
+      ["other", "child"],
+      async () => undefined,
+    );
+
+    await removeLeader(wrapper);
+    store.activePlayerId = "other";
+    await flushPromises();
+    await wrapper.get('[aria-label="pause"]').trigger("click");
+
+    expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith("other");
+    joining.resolve();
+    await earlier;
+    await flushPromises();
+  });
+
+  it.each(["synced_to", "active_group"] as const)(
+    "does not reclaim a retained member whose %s moved to another idle room",
+    async (ownership) => {
+      mountPlayerControls();
+      api.players.other = createPlayer({
+        player_id: "other",
+        name: "Bedroom",
+        active_source: "other",
+      });
+      api.queues.other = playerQueue({ queue_id: "other", items: 2 });
+      const joining = deferred();
+      vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(
+        joining.promise,
+      );
+      vi.mocked(api.sendCommand).mockImplementation(async () =>
+        acknowledgeTransfer(),
+      );
+      const restore = async () => undefined;
+      const earlier = setPlayerGroupMembers(
+        "other",
+        ["child"],
+        [],
+        ["other", "child"],
+        restore,
+      );
+      const handoff = setPlayerGroupMembers(
+        "leader",
+        [],
+        ["leader"],
+        ["child"],
+        restore,
+      );
+
+      await acknowledgeMemberUpdate("other", ["child"]);
+      if (ownership === "active_group") {
+        api.players.child.synced_to = null;
+        api.players.child.active_group = "other";
+      }
+      joining.resolve();
+      await Promise.all([earlier, handoff]);
+
+      expect(api.sendCommand).not.toHaveBeenCalled();
+      expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+        "other",
+        ["child"],
+        undefined,
+      );
+      expect(api.players.child[ownership]).toBe("other");
+      expect(api.queues.leader.items).toBe(8);
+      expect(store.activePlayerId).toBe("leader");
+    },
+  );
+
+  it("does not detach a removed member that now belongs to another playing room", async () => {
+    mountPlayerControls();
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom speaker",
+      synced_to: "foreign",
+      active_source: "foreign",
+      playback_state: PlaybackState.PLAYING,
+    });
+    api.players.foreign = createPlayer({
+      player_id: "foreign",
+      active_source: "foreign",
+      group_members: ["foreign", "other"],
+      playback_state: PlaybackState.PLAYING,
+    });
+    api.queues.foreign = playerQueue({
+      queue_id: "foreign",
+      items: 11,
+      state: PlaybackState.PLAYING,
+    });
+    api.players.leader.group_members.push("other");
+    vi.mocked(api.sendCommand).mockImplementation(async () =>
+      acknowledgeTransfer(),
+    );
+
+    await setPlayerGroupMembers(
+      "leader",
+      [],
+      ["leader", "other"],
+      ["child"],
+      async () => undefined,
+    );
+
+    expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+      "leader",
+      undefined,
+      ["child"],
+    );
+    expect(api.players.other.synced_to).toBe("foreign");
+    expect(api.queues.foreign.state).toBe(PlaybackState.PLAYING);
+    expect(api.queues.foreign.items).toBe(11);
+    expect(store.activePlayerId).toBe("child");
+  });
+
+  it("allows an explicitly selected idle member to leave its previous group", async () => {
+    const { wrapper } = mountPlayerControls(false);
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom",
+      active_source: "other",
+      group_members: ["other", "child"],
+    });
+    api.queues.other = playerQueue({ queue_id: "other", items: 4 });
+    api.players.child.synced_to = "other";
+    api.players.child.active_source = "other";
+    vi.mocked(api.sendCommand).mockImplementation(async () => {
+      acknowledgeTransfer();
+      api.players.other.group_members = ["other"];
+    });
+
+    await wrapper.get('[aria-label="Office"]').trigger("click");
+    await removeLeader(wrapper);
+
+    expect(api.sendCommand).toHaveBeenCalledExactlyOnceWith(
+      "player_queues/transfer",
+      {
+        source_queue_id: "leader",
+        target_queue_id: "child",
+        auto_play: false,
+      },
+    );
+    expect(store.activePlayerId).toBe("child");
+    expect(api.queues.other.items).toBe(4);
+  });
+
+  it("does not reserve a known playing destination while an earlier request waits", async () => {
+    const { wrapper } = mountPlayerControls(false);
+    api.players.child.playback_state = PlaybackState.PLAYING;
+    api.queues.child.state = PlaybackState.PLAYING;
+    const joining = deferred();
+    vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(joining.promise);
+    const earlier = setPlayerGroupMembers(
+      "leader",
+      ["child"],
+      [],
+      ["leader", "child"],
+      async () => undefined,
+    );
+
+    await wrapper.get('[aria-label="Office"]').trigger("click");
+    await removeLeader(wrapper);
+    store.activePlayerId = "child";
+    await flushPromises();
+    await wrapper.get('[aria-label="pause"]').trigger("click");
+
+    expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith("child");
+    joining.resolve();
+    await earlier;
+    await flushPromises();
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(api.playerCommandSetMembers).toHaveBeenCalledTimes(1);
+    expect(api.queues.child.items).toBe(3);
+  });
+
+  it.each([
+    { member: "child", change: "player" },
+    { member: "child", change: "queue" },
+    { member: "other", change: "player" },
+    { member: "other", change: "group" },
+  ])(
+    "preserves a $member $change change observed while detaching",
+    async ({ member, change }) => {
+      const { wrapper } = mountPlayerControls();
+      api.players.other = createPlayer({
+        player_id: "other",
+        name: "Bedroom",
+        synced_to: "leader",
+        can_group_with: ["child"],
+      });
+      api.queues.other = playerQueue({ queue_id: "other", items: 5 });
+      api.players.leader.group_members.push("other");
+      const detaching = deferred();
+      vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(
+        detaching.promise,
+      );
+      vi.mocked(api.sendCommand).mockImplementation(async () =>
+        acknowledgeTransfer(),
+      );
+
+      await removeLeader(wrapper);
+      await acknowledgeMemberUpdate("leader", undefined, ["child", "other"]);
+      if (change === "group") {
+        api.players.foreign = createPlayer({
+          player_id: "foreign",
+          active_source: "foreign",
+          group_members: ["foreign", member],
+        });
+        api.queues.foreign = playerQueue({ queue_id: "foreign", items: 11 });
+        api.players[member].synced_to = "foreign";
+        api.players[member].active_source = "foreign";
+      } else if (change === "queue") {
+        api.queues[member].state = PlaybackState.PLAYING;
+      } else {
+        api.players[member].playback_state = PlaybackState.PLAYING;
+      }
+      detaching.resolve();
+      await flushPromises();
+
+      expect(api.sendCommand).not.toHaveBeenCalled();
+      expect(api.playerCommandSetMembers).toHaveBeenCalledTimes(1);
+      expect(api.queues.leader.items).toBe(8);
+      expect(api.queues.other.items).toBe(5);
+      expect(store.activePlayerId).toBe("leader");
+    },
+  );
+
+  it.each(["playing", "other_group"])(
+    "keeps the acknowledged target but skips regroup after a follower becomes %s",
+    async (change) => {
+      const { wrapper } = mountPlayerControls();
+      api.players.other = createPlayer({
+        player_id: "other",
+        name: "Bedroom",
+        synced_to: "leader",
+        can_group_with: ["child"],
+      });
+      api.queues.other = playerQueue({ queue_id: "other", items: 5 });
+      api.players.leader.group_members.push("other");
+      const transfer = deferred();
+      vi.mocked(api.sendCommand).mockReturnValueOnce(transfer.promise);
+
+      await removeLeader(wrapper);
+      acknowledgeTransfer();
+      if (change === "playing") {
+        api.players.other.playback_state = PlaybackState.PLAYING;
+        api.queues.other.state = PlaybackState.PLAYING;
+      } else {
+        api.players.foreign = createPlayer({
+          player_id: "foreign",
+          active_source: "foreign",
+          group_members: ["foreign", "other"],
+        });
+        api.queues.foreign = playerQueue({ queue_id: "foreign", items: 11 });
+        api.players.other.synced_to = "foreign";
+        api.players.other.active_source = "foreign";
+      }
+      transfer.resolve();
+      await flushPromises();
+
+      expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+        "leader",
+        undefined,
+        ["child", "other"],
+      );
+      expect(store.activePlayerId).toBe("child");
+      expect(api.queues.child.items).toBe(8);
+      expect(api.queues.leader.items).toBe(0);
+      expect(api.queues.other.items).toBe(5);
+      expect(api.players.other.synced_to).toBe(
+        change === "playing" ? null : "foreign",
+      );
+    },
+  );
+
+  it.each([EventType.PLAYER_UPDATED, EventType.DISCONNECTED])(
+    "delivers %s to later API listeners when a handoff waiter settles",
+    async (event) => {
+      const { MusicAssistantApi: RealApi } =
+        await vi.importActual<typeof import("@/plugins/api")>("@/plugins/api");
+      const events = new RealApi();
+      vi.mocked(api.subscribe_multi).mockImplementation(
+        events.subscribe_multi.bind(events),
+      );
+      const { wrapper } = mountPlayerControls();
+      api.players.other = createPlayer({
+        player_id: "other",
+        name: "Bedroom",
+        synced_to: "leader",
+      });
+      api.players.leader.group_members.push("other");
+      vi.mocked(api.playerCommandSetMembers).mockResolvedValueOnce();
+      vi.mocked(api.sendCommand).mockImplementation(async () =>
+        acknowledgeTransfer(),
+      );
+      await removeLeader(wrapper);
+      expect(api.sendCommand).not.toHaveBeenCalled();
+      const observed = vi.fn();
+      const stopObserving = events.subscribe(event, observed);
+      try {
+        if (event === EventType.PLAYER_UPDATED) {
+          api.players.child.synced_to = null;
+          api.players.child.active_source = "child";
+          api.players.child.can_group_with = ["other"];
+        }
+        events.signalEvent({ event });
+        expect(observed).toHaveBeenCalledExactlyOnceWith({ event });
+        await flushPromises();
+        expect(store.activePlayerId).toBe(
+          event === EventType.PLAYER_UPDATED ? "child" : "leader",
+        );
+      } finally {
+        stopObserving();
+      }
+    },
+  );
+
+  it("does not apply another player's unsent edits to a captured restore", async () => {
+    const { wrapper } = mountPlayerControls(false, false);
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom",
+      active_source: "other",
+      can_group_with: ["fourth"],
+    });
+    api.players.fourth = createPlayer({
+      player_id: "fourth",
+      name: "Den",
+      active_source: "fourth",
+    });
+    api.queues.other = playerQueue({ queue_id: "other", items: 2 });
+    const restoredLeader = { ...api.players.leader, group_members: [] };
+    const joining = deferred();
+    vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(joining.promise);
+    await wrapper.get('[aria-label="Office"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(500);
+
+    store.activePlayerId = "other";
+    await flushPromises();
+    await wrapper.get('[aria-label="Den"]').trigger("click");
+    vi.mocked(api.getPlayer).mockResolvedValueOnce(restoredLeader);
+    joining.reject(new Error("Membership failed"));
+    await flushPromises();
+
+    expect(api.players.leader.group_members).toEqual([]);
+    expect(api.players.other.group_members).toContain("fourth");
+  });
 
   it("does not overwrite a saved destination queue with an empty source", async () => {
     const { wrapper } = mountPlayerControls();
