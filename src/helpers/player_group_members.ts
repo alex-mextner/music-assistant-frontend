@@ -186,7 +186,7 @@ export function setPlayerGroupMembers(
       playerIdsToRemove,
     ) !== undefined;
   const owner = Symbol(playerId);
-  if (playerIdsToRemove.includes(playerId)) {
+  if (idleHandoff) {
     for (const id of playerIds) pendingGroupTransfers.set(id, owner);
   }
   const update: MemberUpdate = { playerIds, promise: Promise.resolve() };
@@ -221,20 +221,22 @@ async function applyGroupMemberUpdate(
   remainingMemberIds: string[],
   idleHandoff: boolean,
 ): Promise<void> {
-  const player = api.players[playerId];
-  const target = idleTransferTarget(
-    player,
-    remainingMemberIds,
-    playerIdsToRemove,
-  );
-  if (!target) {
-    if (idleHandoff) sourceChanged();
+  // Keep the original route after waiting for earlier membership requests.
+  // Playing, paused and empty-source changes must not enter an unreserved move.
+  if (!idleHandoff) {
     return api.playerCommandSetMembers(
       playerId,
       playerIdsToAdd.length ? playerIdsToAdd : undefined,
       playerIdsToRemove.length ? playerIdsToRemove : undefined,
     );
   }
+  const player = api.players[playerId];
+  const target = idleTransferTarget(
+    player,
+    remainingMemberIds,
+    playerIdsToRemove,
+  );
+  if (!target) sourceChanged();
 
   let targetId = target.player_id;
   try {
