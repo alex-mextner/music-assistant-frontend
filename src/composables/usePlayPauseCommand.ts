@@ -8,10 +8,12 @@ import {
 } from "@/plugins/api/interfaces";
 import { useActiveAudioSource } from "@/composables/activeAudioSource";
 import { useActiveSource } from "@/composables/activeSource";
+import { pendingGroupTransfers } from "@/helpers/player_group_members";
 
 type PlayerRef = ComputedRef<Player | undefined> | Ref<Player | undefined>;
 type PlayerQueueRef =
-  ComputedRef<PlayerQueue | undefined> | Ref<PlayerQueue | undefined>;
+  | ComputedRef<PlayerQueue | undefined>
+  | Ref<PlayerQueue | undefined>;
 
 // Shared by the play button and the spacebar shortcut so they always agree.
 export function usePlayPauseCommand(
@@ -64,6 +66,7 @@ export function usePlayPauseCommand(
   const isLoading = computed(() => {
     if (!player.value) return false;
     return (
+      pendingGroupTransfers.has(player.value.player_id) ||
       playerQueue.value?.extra_attributes?.play_action_in_progress === true
     );
   });
@@ -79,7 +82,7 @@ export function usePlayPauseCommand(
   });
 
   const playPause = () => {
-    if (!player.value) return;
+    if (!player.value || isLoading.value) return;
     if (isPlaying.value && showStop.value) {
       api.playerCommandStop(player.value.player_id);
     } else {

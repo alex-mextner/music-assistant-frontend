@@ -68,6 +68,10 @@ import PlayerStatusIcon from "@/components/settings/players/PlayerStatusIcon.vue
 import { Checkbox } from "@/components/ui/checkbox";
 import { Separator } from "@/components/ui/separator";
 import type { PlayerGroupFilter } from "@/helpers/player_group";
+import {
+  pendingGroupTransfers,
+  setPlayerGroupMembers,
+} from "@/helpers/player_group_members";
 import { requestGroupPlaybackConfirmation } from "@/helpers/player_group_playback";
 import { playerSectionOf, playerSections } from "@/helpers/player_sections";
 import {
@@ -108,7 +112,9 @@ const props = withDefaults(
 
 const playersToAdd = ref<string[]>([]);
 const playersToRemove = ref<string[]>([]);
+const desiredMembers = ref<string[] | undefined>();
 let timeoutId: ReturnType<typeof setTimeout> | undefined;
+let pendingMemberUpdate: Promise<void> | undefined;
 
 onUnmounted(flushPendingMemberUpdate);
 
@@ -172,6 +178,9 @@ function getCheckboxId(player: Player) {
 }
 
 function isGroupMember(player: Player) {
+  if (desiredMembers.value) {
+    return desiredMembers.value.includes(player.player_id);
+  }
   return (
     player.player_id === props.player.player_id ||
     props.player.group_members.includes(player.player_id)
@@ -180,8 +189,14 @@ function isGroupMember(player: Player) {
 
 function isRequiredMember(player: Player) {
   if (
+    pendingGroupTransfers.has(props.player.player_id) ||
+    pendingGroupTransfers.has(player.player_id)
+  ) {
+    return true;
+  }
+  if (
     player.player_id === props.player.player_id &&
-    props.members.length <= 1
+    (desiredMembers.value?.length ?? props.members.length) <= 1
   ) {
     return true;
   }
@@ -214,6 +229,7 @@ function sortPlayers(players: Player[]) {
 }
 
 function updateGroupMember(playerId: string, selected: boolean) {
+  if (pendingGroupTransfers.has(props.player.player_id)) return;
   if (
     !selected &&
     playerId === props.player.player_id &&
@@ -229,6 +245,12 @@ function updateGroupMember(playerId: string, selected: boolean) {
 
 function applyGroupMemberUpdate(playerId: string, selected: boolean) {
   const parentPlayerId = props.player.player_id;
+  desiredMembers.value ??= [
+    ...new Set([parentPlayerId, ...props.player.group_members]),
+  ];
+  desiredMembers.value = selected
+    ? [...new Set([...desiredMembers.value, playerId])]
+    : desiredMembers.value.filter((id) => id !== playerId);
 
   if (selected) {
     playersToRemove.value = playersToRemove.value.filter(
@@ -261,27 +283,44 @@ function applyGroupMemberUpdate(playerId: string, selected: boolean) {
 
 function scheduleMemberUpdate() {
   if (timeoutId) clearTimeout(timeoutId);
+  timeoutId = undefined;
   if (playersToAdd.value.length === 0 && playersToRemove.value.length === 0) {
+    if (!pendingMemberUpdate) desiredMembers.value = undefined;
     return;
   }
 
+  if (playersToRemove.value.includes(props.player.player_id)) {
+    // Mark and submit a handoff immediately, so Play cannot target the old
+    // leader during the debounce interval or an earlier membership request.
+    sendMemberUpdate();
+    return;
+  }
   timeoutId = setTimeout(sendMemberUpdate, 500);
 }
 
 function sendMemberUpdate() {
+  const playerId = props.player.player_id;
+  const desiredMemberIds = [
+    ...(desiredMembers.value ?? props.player.group_members),
+  ];
   const playerIdsToAdd = [...playersToAdd.value];
   const playerIdsToRemove = [...playersToRemove.value];
   playersToAdd.value = [];
   playersToRemove.value = [];
   timeoutId = undefined;
 
-  api
-    .playerCommandSetMembers(
-      props.player.player_id,
-      playerIdsToAdd.length ? playerIdsToAdd : undefined,
-      playerIdsToRemove.length ? playerIdsToRemove : undefined,
-    )
-    .catch(restorePlayer);
+  const update = setPlayerGroupMembers(
+    playerId,
+    playerIdsToAdd,
+    playerIdsToRemove,
+    desiredMemberIds,
+    () => restorePlayer(playerId),
+  ).finally(() => {
+    if (pendingMemberUpdate !== update) return;
+    pendingMemberUpdate = undefined;
+    if (!timeoutId) desiredMembers.value = undefined;
+  });
+  pendingMemberUpdate = update;
 }
 
 function flushPendingMemberUpdate() {
@@ -290,8 +329,8 @@ function flushPendingMemberUpdate() {
   sendMemberUpdate();
 }
 
-async function restorePlayer() {
-  const restoredPlayer = await api.getPlayer(props.player.player_id);
+async function restorePlayer(playerId: string) {
+  const restoredPlayer = await api.getPlayer(playerId);
   for (const playerId of playersToAdd.value) {
     if (!restoredPlayer.group_members.includes(playerId)) {
       restoredPlayer.group_members.push(playerId);
@@ -300,6 +339,6 @@ async function restorePlayer() {
   restoredPlayer.group_members = restoredPlayer.group_members.filter(
     (playerId) => !playersToRemove.value.includes(playerId),
   );
-  api.players[props.player.player_id] = restoredPlayer;
+  api.players[playerId] = restoredPlayer;
 }
 </script>
