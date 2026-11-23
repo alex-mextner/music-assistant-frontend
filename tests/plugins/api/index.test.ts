@@ -23,6 +23,8 @@ import {
   UserRole,
 } from "@/plugins/api/interfaces";
 import { getIngressClientKey } from "@/helpers/ingress";
+import { pendingGroupTransfers } from "@/helpers/player_group_members";
+import { store } from "@/plugins/store";
 import { eventbus, type StreamHeldDialogEvent } from "@/plugins/eventbus";
 import { BaseTransport, TransportState } from "@/plugins/remote/transport";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -2096,3 +2098,180 @@ function createErrorResult(
     data: null,
   };
 }
+
+describe("playback commands during a group handoff", () => {
+  let api: MusicAssistantApi;
+  let transport: TestTransport;
+
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    hasScope.mockImplementation(scopeChecker(BUILTIN_ROLE_SCOPES.admin));
+    api = new MusicAssistantApi();
+    transport = new TestTransport();
+    const initialization = api.initialize(transport);
+    transport.receive(SERVER_INFO);
+    await initialization;
+    pendingGroupTransfers.set("leader", Symbol("handoff"));
+  });
+
+  afterEach(() => {
+    api.disconnect();
+    pendingGroupTransfers.clear();
+    delete store.activePlayer;
+  });
+
+  function playbackCommands() {
+    return transport.sentCommands.filter(
+      (message) => message.command !== "time",
+    );
+  }
+
+  function expectNoPlaybackRequestPending() {
+    for (const id of api["commands"].keys()) {
+      const command = transport.sentCommands.find(
+        (message) => message.message_id === String(id),
+      );
+      expect(command?.command).toBe("time");
+    }
+  }
+
+  async function acknowledge(request: Promise<void>) {
+    for (const command of transport.sentCommands) {
+      if (!command.message_id) throw new Error("Command has no message ID");
+      transport.receive({
+        message_id: command.message_id,
+        result: command.command === "time" ? Date.now() / 1000 : null,
+      });
+    }
+    await request;
+  }
+
+  it.each(["play", "play_pause", "next", "previous", "seek"])(
+    "blocks the player %s command before transport dispatch",
+    async (command) => {
+      await acknowledge(api.playerCommand("leader", command));
+      expect(playbackCommands()).toEqual([]);
+      expectNoPlaybackRequestPending();
+    },
+  );
+
+  it.each(["resume", "play_index", "next", "previous", "seek", "skip"])(
+    "blocks the queue %s command before transport dispatch",
+    (command) => {
+      api.playerQueueCommand("leader", command);
+      expect(playbackCommands()).toEqual([]);
+    },
+  );
+
+  it("blocks acknowledged queue-item Play during a group handoff", async () => {
+    await acknowledge(api.queueCommandPlayIndex("leader", 2));
+    expect(playbackCommands()).toEqual([]);
+    expectNoPlaybackRequestPending();
+  });
+
+  it("preserves queue-item Play acknowledgement for an unrelated room", async () => {
+    const request = api.queueCommandPlayIndex("other", 2);
+    let settled = false;
+    void request.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(playbackCommands()).toEqual([
+      expect.objectContaining({
+        command: "player_queues/play_index",
+        args: { queue_id: "other", index: 2 },
+      }),
+    ]);
+    await acknowledge(request);
+    expect(settled).toBe(true);
+  });
+
+  it("blocks media-item Play for the reserved queue", async () => {
+    await acknowledge(
+      api.playMedia("library://track/1", undefined, {
+        queue_id: "leader",
+      }),
+    );
+    expect(playbackCommands()).toEqual([]);
+    expectNoPlaybackRequestPending();
+  });
+
+  it("blocks implicit Play on a reserved player while preserving explicit queue routing", async () => {
+    pendingGroupTransfers.clear();
+    pendingGroupTransfers.set("child", Symbol("handoff"));
+    store.activePlayer = {
+      player_id: "child",
+      active_source: "foreign",
+    } as Player;
+    api.queues.foreign = playerQueue({ queue_id: "foreign" });
+    await acknowledge(api.playMedia("library://track/1"));
+    expect(playbackCommands()).toEqual([]);
+
+    await acknowledge(
+      api.playMedia("library://track/1", undefined, { queue_id: "foreign" }),
+    );
+    expect(playbackCommands()).toEqual([
+      expect.objectContaining({
+        command: "player_queues/play_media",
+        args: expect.objectContaining({ queue_id: "foreign" }),
+      }),
+    ]);
+  });
+
+  it("allows grouping and state reads needed by the handoff", async () => {
+    await acknowledge(
+      Promise.all([
+        api.playerCommandSetMembers("leader", undefined, ["child"]),
+        api.getPlayer("leader"),
+        api.getPlayerQueues(),
+      ]).then(() => undefined),
+    );
+    expect(playbackCommands().map((message) => message.command)).toEqual([
+      "players/cmd/set_members",
+      "players/get",
+      "player_queues/all",
+    ]);
+  });
+
+  it.each(["leader", "child"])(
+    "blocks a second menu transfer when its %s endpoint is reserved",
+    (reserved) => {
+      pendingGroupTransfers.clear();
+      pendingGroupTransfers.set(reserved, Symbol("handoff"));
+      api.queueCommandTransfer("leader", "child");
+      expect(playbackCommands()).toEqual([]);
+    },
+  );
+
+  it("allows the handoff's acknowledged transfer command", async () => {
+    await acknowledge(
+      api.sendCommand<void>("player_queues/transfer", {
+        source_queue_id: "leader",
+        target_queue_id: "child",
+        auto_play: false,
+      }),
+    );
+    expect(playbackCommands()).toEqual([
+      expect.objectContaining({ command: "player_queues/transfer" }),
+    ]);
+    expectNoPlaybackRequestPending();
+  });
+
+  it("keeps Stop, Pause, volume and an unrelated room usable", async () => {
+    await acknowledge(
+      Promise.all([
+        api.playerCommandStop("leader"),
+        api.playerCommandPause("leader"),
+        api.playerCommand("leader", "volume_set", { volume_level: 30 }),
+        api.playerCommandPlay("other"),
+      ]).then(() => undefined),
+    );
+    expect(playbackCommands().map((message) => message.command)).toEqual([
+      "players/cmd/stop",
+      "players/cmd/pause",
+      "players/cmd/volume_set",
+      "players/cmd/play",
+    ]);
+  });
+});

@@ -3,6 +3,7 @@ import PlayBtn from "@/layouts/default/PlayerOSD/PlayerControlBtn/PlayBtn.vue";
 import { api, type MusicAssistantApi } from "@/plugins/api";
 import {
   IdentifierType,
+  EventType,
   PlaybackState,
   type Player,
   PlayerFeature,
@@ -21,6 +22,7 @@ vi.mock("@/plugins/api", async () => {
   const api = reactive({
     players: {} as Record<string, Player>,
     queues: {} as Record<string, PlayerQueue>,
+    queueElapsedTime: {} as MusicAssistantApi["queueElapsedTime"],
     getPlayer: vi.fn<MusicAssistantApi["getPlayer"]>(),
     getPlayerQueues: vi.fn<MusicAssistantApi["getPlayerQueues"]>(),
     playerCommandSetMembers:
@@ -28,6 +30,7 @@ vi.mock("@/plugins/api", async () => {
     playerCommandPlayPause:
       vi.fn<MusicAssistantApi["playerCommandPlayPause"]>(),
     sendCommand: vi.fn<MusicAssistantApi["sendCommand"]>(),
+    subscribe_multi: vi.fn<MusicAssistantApi["subscribe_multi"]>(),
   });
   return { api, default: api };
 });
@@ -88,10 +91,7 @@ function createPlayer(overrides: Partial<Player> = {}): Player {
     volume_control: "volume",
     mute_control: "mute",
     needs_setup: false,
-    setup_reason: null,
     has_setup_flow: false,
-    legacy_ids: [],
-    protocols: [],
     output_protocols: [],
     active_output_protocol: null,
     elapsed_time: null,
@@ -102,12 +102,16 @@ function createPlayer(overrides: Partial<Player> = {}): Player {
     active_group: null,
     synced_to: null,
     sleep_timer_expires_at: null,
+    setup_reason: null,
+    legacy_ids: [],
+    protocols: [],
     sleep_timer_mode: null,
     active_source_audio: null,
     ...overrides,
   };
 }
 
+const groupListeners = new Set<(event: { event: EventType }) => void>();
 const wrappers: VueWrapper[] = [];
 const finishRequests: (() => void)[] = [];
 
@@ -133,6 +137,7 @@ function mountPlayerControls(grouped = true) {
     active_source: grouped ? "leader" : "child",
   });
   api.players = { leader, child };
+  api.queueElapsedTime = {};
   api.queues = {
     leader: playerQueue({
       queue_id: "leader",
@@ -152,7 +157,8 @@ function mountPlayerControls(grouped = true) {
         const members = computed(() =>
           [player.value.player_id, ...player.value.group_members]
             .filter((id, index, ids) => ids.indexOf(id) === index)
-            .map((id) => api.players[id]),
+            .map((id) => api.players[id])
+            .filter((member) => member?.available),
         );
         return { player, queue, members };
       },
@@ -184,19 +190,57 @@ async function removeLeader(wrapper: VueWrapper) {
   await flushPromises();
 }
 
-function acknowledgeTransfer() {
-  api.queues.child = { ...api.queues.leader, queue_id: "child" };
+function acknowledgeTransfer(targetId = "child") {
+  api.queues[targetId] = { ...api.queues.leader, queue_id: targetId };
   api.queues.leader = playerQueue({ queue_id: "leader" });
   api.players.leader.group_members = [];
-  api.players.child.synced_to = null;
-  api.players.child.active_source = "child";
+  api.players[targetId].synced_to = null;
+  api.players[targetId].active_source = targetId;
+}
+
+async function acknowledgeMemberUpdate(
+  playerId: string,
+  additions?: string[],
+  removals?: string[],
+) {
+  const parent = api.players[playerId];
+  if (!parent || removals?.includes(playerId)) return;
+  for (const id of removals ?? []) {
+    const member = api.players[id];
+    if (member?.synced_to === playerId) {
+      member.synced_to = null;
+      member.active_group = null;
+      member.active_source = id;
+    }
+  }
+  parent.group_members = parent.group_members.filter(
+    (id) => !removals?.includes(id),
+  );
+  for (const id of additions ?? []) {
+    parent.group_members = [
+      ...new Set([playerId, ...parent.group_members, id]),
+    ];
+    if (api.players[id]) {
+      api.players[id].synced_to = playerId;
+      api.players[id].active_source = playerId;
+    }
+  }
 }
 
 describe("changing the idle group playback target", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.useFakeTimers();
-    vi.mocked(api.playerCommandSetMembers).mockResolvedValue();
+    vi.mocked(api.playerCommandSetMembers).mockImplementation(
+      acknowledgeMemberUpdate,
+    );
+    vi.mocked(api.subscribe_multi).mockImplementation((_events, callback) => {
+      const listener = (event: { event: EventType }) => callback(event);
+      groupListeners.add(listener);
+      return () => {
+        groupListeners.delete(listener);
+      };
+    });
     vi.mocked(api.playerCommandPlayPause).mockResolvedValue();
     vi.mocked(api.sendCommand).mockResolvedValue(undefined);
     vi.mocked(api.getPlayer).mockImplementation(async (id) => ({
@@ -215,6 +259,7 @@ describe("changing the idle group playback target", () => {
     await vi.runAllTimersAsync();
     await flushPromises();
     vi.useRealTimers();
+    groupListeners.clear();
   });
 
   it("moves the stopped queue before the next Play targets the remaining speaker", async () => {
@@ -238,6 +283,36 @@ describe("changing the idle group playback target", () => {
     expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith("child");
   });
 
+  it("reconciles stale progress from the final queue snapshot", async () => {
+    const { wrapper } = mountPlayerControls();
+    api.queueElapsedTime = {
+      leader: { elapsed_time: 42, elapsed_time_last_updated: 1000 },
+      child: { elapsed_time: 9, elapsed_time_last_updated: 900 },
+      unrelated: { elapsed_time: 12, elapsed_time_last_updated: 1100 },
+    };
+    vi.mocked(api.getPlayerQueues).mockResolvedValue([
+      playerQueue({
+        queue_id: "leader",
+        elapsed_time: 0,
+        elapsed_time_last_updated: 1200,
+      }),
+      playerQueue({
+        ...api.queues.leader,
+        queue_id: "child",
+        elapsed_time_last_updated: 1200,
+      }),
+    ]);
+
+    await removeLeader(wrapper);
+
+    expect(api.queues.child.current_index).toBe(6);
+    expect(api.queueElapsedTime).toEqual({
+      leader: { elapsed_time: 0, elapsed_time_last_updated: 1200 },
+      child: { elapsed_time: 42, elapsed_time_last_updated: 1200 },
+      unrelated: { elapsed_time: 12, elapsed_time_last_updated: 1100 },
+    });
+  });
+
   it("blocks Play from the checkbox click until the server acknowledges the transfer", async () => {
     const { wrapper } = mountPlayerControls();
     const transfer = deferred();
@@ -259,6 +334,33 @@ describe("changing the idle group playback target", () => {
     expect(store.activePlayerId).toBe("child");
     await wrapper.get('[aria-label="play"]').trigger("click");
     expect(api.playerCommandPlayPause).toHaveBeenCalledExactlyOnceWith("child");
+  });
+
+  it("keeps the last available member checked when an offline member remains", async () => {
+    const { wrapper, leader } = mountPlayerControls();
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Garage",
+      available: false,
+      synced_to: "leader",
+    });
+    leader.group_members.push("other");
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Office"]').trigger("click");
+    const lastMember = wrapper.get('[aria-label="Kitchen"]');
+    expect(lastMember.attributes("disabled")).toBeDefined();
+    await lastMember.trigger("click");
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+
+    expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+      "leader",
+      undefined,
+      ["child"],
+    );
+    expect(api.sendCommand).not.toHaveBeenCalled();
+    expect(store.activePlayerId).toBe("leader");
   });
 
   it("preserves a new destination selected in the same debounce interval", async () => {
@@ -354,7 +456,7 @@ describe("changing the idle group playback target", () => {
       acknowledgeTransfer();
     });
     vi.mocked(api.playerCommandSetMembers)
-      .mockResolvedValueOnce()
+      .mockImplementationOnce(acknowledgeMemberUpdate)
       .mockRejectedValueOnce(new Error("Regroup failed"));
 
     await removeLeader(wrapper);
@@ -362,6 +464,106 @@ describe("changing the idle group playback target", () => {
     expect(store.activePlayerId).toBe("child");
     expect(api.getPlayerQueues).toHaveBeenCalled();
     expect(api.playerCommandPlayPause).not.toHaveBeenCalled();
+  });
+
+  it("chooses a remaining player that can lead all available followers", async () => {
+    const { wrapper, leader, child } = mountPlayerControls();
+    child.supported_features = [];
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom",
+      synced_to: "leader",
+      can_group_with: ["child"],
+    });
+    leader.group_members.push("other");
+    vi.mocked(api.sendCommand).mockImplementation(async () => {
+      acknowledgeTransfer("other");
+    });
+
+    await removeLeader(wrapper);
+
+    expect(api.sendCommand).toHaveBeenCalledWith("player_queues/transfer", {
+      source_queue_id: "leader",
+      target_queue_id: "other",
+      auto_play: false,
+    });
+    expect(api.playerCommandSetMembers).toHaveBeenCalledWith("other", [
+      "child",
+    ]);
+    expect(store.activePlayerId).toBe("other");
+  });
+
+  it("waits for freed member capabilities before moving a multi-player queue", async () => {
+    const { wrapper, leader } = mountPlayerControls();
+    api.players.other = createPlayer({
+      player_id: "other",
+      name: "Bedroom",
+      synced_to: "leader",
+    });
+    leader.group_members.push("other");
+    vi.mocked(api.playerCommandSetMembers).mockResolvedValueOnce();
+    vi.mocked(api.sendCommand).mockImplementation(async () =>
+      acknowledgeTransfer(),
+    );
+
+    await removeLeader(wrapper);
+    expect(api.sendCommand).not.toHaveBeenCalled();
+
+    api.players.child.synced_to = null;
+    api.players.child.can_group_with = ["other"];
+    for (const listener of groupListeners)
+      listener({ event: EventType.PLAYER_UPDATED });
+    await flushPromises();
+
+    expect(store.activePlayerId).toBe("child");
+    expect(groupListeners.size).toBe(0);
+    expect(api.playerCommandSetMembers).toHaveBeenCalledWith("child", [
+      "other",
+    ]);
+  });
+
+  it.each(["timeout", "disconnect"])(
+    "keeps the source queue when no compatible leader settles before %s",
+    async (failure) => {
+      const { wrapper, leader, child } = mountPlayerControls();
+      child.can_group_with = [];
+      api.players.other = createPlayer({
+        player_id: "other",
+        name: "Bedroom",
+        synced_to: "leader",
+        can_group_with: [],
+      });
+      leader.group_members.push("other");
+      await removeLeader(wrapper);
+      expect(api.sendCommand).not.toHaveBeenCalled();
+
+      if (failure === "disconnect") {
+        for (const listener of groupListeners)
+          listener({ event: EventType.DISCONNECTED });
+      } else {
+        await vi.advanceTimersByTimeAsync(5000);
+      }
+      await flushPromises();
+
+      expect(api.queues.leader.items).toBe(8);
+      expect(store.activePlayerId).toBe("leader");
+      expect(api.sendCommand).not.toHaveBeenCalled();
+      expect(toast.error).toHaveBeenCalledWith(
+        "player_group_playback.regroup_unavailable",
+      );
+      expect(groupListeners.size).toBe(0);
+    },
+  );
+
+  it("does not require grouping support for a single remaining destination", async () => {
+    const { wrapper, child } = mountPlayerControls();
+    child.supported_features = [];
+    vi.mocked(api.sendCommand).mockImplementation(async () =>
+      acknowledgeTransfer(),
+    );
+    await removeLeader(wrapper);
+    expect(store.activePlayerId).toBe("child");
+    expect(api.sendCommand).toHaveBeenCalledTimes(1);
   });
 
   it("keeps a destination reserved when another group tries to transfer to it", async () => {
