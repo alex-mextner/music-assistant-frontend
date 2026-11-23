@@ -517,6 +517,123 @@ describe("changing the idle group playback target", () => {
     expect(api.sendCommand).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps an idle destination addition from the previous pending batch", async () => {
+    const { wrapper } = mountPlayerControls(false);
+    api.players.other = createPlayer({
+      player_id: "other",
+      active_source: "other",
+      group_members: ["other", "child"],
+    });
+    api.queues.other = playerQueue({ queue_id: "other", items: 4 });
+    api.players.child.synced_to = "other";
+    api.players.child.active_source = "other";
+    const joining = deferred();
+    vi.mocked(api.playerCommandSetMembers).mockReturnValueOnce(joining.promise);
+    vi.mocked(api.sendCommand).mockImplementation(async () =>
+      acknowledgeTransfer(),
+    );
+
+    await wrapper.get('[aria-label="Office"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(500);
+    await removeLeader(wrapper);
+    expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+      "leader",
+      ["child"],
+      undefined,
+    );
+    expect(api.sendCommand).not.toHaveBeenCalled();
+
+    await acknowledgeMemberUpdate("leader", ["child"]);
+    api.players.other.group_members = ["other"];
+    joining.resolve();
+    await flushPromises();
+
+    expect(api.sendCommand).toHaveBeenCalledExactlyOnceWith(
+      "player_queues/transfer",
+      {
+        source_queue_id: "leader",
+        target_queue_id: "child",
+        auto_play: false,
+      },
+    );
+    expect(store.activePlayerId).toBe("child");
+    expect(api.queues.child.items).toBe(8);
+    expect(api.queues.other.items).toBe(4);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it("keeps explicit additions through a chain of pending updates on the same leader", async () => {
+    mountPlayerControls(false);
+    api.players.foreign = createPlayer({
+      player_id: "foreign",
+      active_source: "foreign",
+      group_members: ["foreign", "child"],
+    });
+    api.players.other = createPlayer({
+      player_id: "other",
+      active_source: "other",
+      can_group_with: ["child"],
+    });
+    api.queues.foreign = playerQueue({ queue_id: "foreign", items: 4 });
+    api.queues.other = playerQueue({ queue_id: "other", items: 5 });
+    api.players.child.synced_to = "foreign";
+    api.players.child.active_source = "foreign";
+    const joining = deferred();
+    const expanding = deferred();
+    vi.mocked(api.playerCommandSetMembers)
+      .mockReturnValueOnce(joining.promise)
+      .mockReturnValueOnce(expanding.promise);
+    vi.mocked(api.sendCommand).mockImplementation(async () =>
+      acknowledgeTransfer(),
+    );
+    const restore = async () => undefined;
+    const first = setPlayerGroupMembers(
+      "leader",
+      ["child"],
+      [],
+      ["leader", "child"],
+      restore,
+    );
+    const second = setPlayerGroupMembers(
+      "leader",
+      ["other"],
+      [],
+      ["leader", "child", "other"],
+      restore,
+    );
+    const handoff = setPlayerGroupMembers(
+      "leader",
+      [],
+      ["leader"],
+      ["child", "other"],
+      restore,
+    );
+    expect(api.playerCommandSetMembers).toHaveBeenCalledTimes(1);
+    expect(api.sendCommand).not.toHaveBeenCalled();
+
+    await acknowledgeMemberUpdate("leader", ["child"]);
+    api.players.foreign.group_members = ["foreign"];
+    joining.resolve();
+    await flushPromises();
+    expect(api.playerCommandSetMembers).toHaveBeenCalledTimes(2);
+    await acknowledgeMemberUpdate("leader", ["other"]);
+    expanding.resolve();
+    await Promise.all([first, second, handoff]);
+
+    expect(api.sendCommand).toHaveBeenCalledExactlyOnceWith(
+      "player_queues/transfer",
+      {
+        source_queue_id: "leader",
+        target_queue_id: "child",
+        auto_play: false,
+      },
+    );
+    expect(store.activePlayerId).toBe("child");
+    expect(api.players.other.synced_to).toBe("child");
+    expect(api.queues.foreign.items).toBe(4);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
   it("does not mistake an existing idle destination queue for a successful transfer", async () => {
     const { wrapper } = mountPlayerControls();
     const transfer = deferred();
@@ -940,6 +1057,43 @@ describe("changing the idle group playback target", () => {
     expect(store.activePlayerId).toBe("child");
   });
 
+  it("does not detach a removed member that now leads its own idle group", async () => {
+    mountPlayerControls();
+    api.players.other = createPlayer({
+      player_id: "other",
+      active_source: "other",
+      group_members: ["other", "foreign"],
+    });
+    api.players.foreign = createPlayer({
+      player_id: "foreign",
+      synced_to: "other",
+      active_source: "other",
+    });
+    api.queues.other = playerQueue({ queue_id: "other", items: 11 });
+    api.players.leader.group_members.push("other");
+    vi.mocked(api.sendCommand).mockImplementation(async () =>
+      acknowledgeTransfer(),
+    );
+
+    await setPlayerGroupMembers(
+      "leader",
+      [],
+      ["leader", "other"],
+      ["child"],
+      async () => undefined,
+    );
+
+    expect(api.playerCommandSetMembers).toHaveBeenCalledExactlyOnceWith(
+      "leader",
+      undefined,
+      ["child"],
+    );
+    expect(api.players.other.group_members).toEqual(["other", "foreign"]);
+    expect(api.players.foreign.synced_to).toBe("other");
+    expect(api.queues.other.items).toBe(11);
+    expect(store.activePlayerId).toBe("child");
+  });
+
   it("allows an explicitly selected idle member to leave its previous group", async () => {
     const { wrapper } = mountPlayerControls(false);
     api.players.other = createPlayer({
@@ -1005,6 +1159,8 @@ describe("changing the idle group playback target", () => {
     { member: "child", change: "queue" },
     { member: "other", change: "player" },
     { member: "other", change: "group" },
+    { member: "child", change: "own_group" },
+    { member: "other", change: "own_group" },
   ])(
     "preserves a $member $change change observed while detaching",
     async ({ member, change }) => {
@@ -1036,6 +1192,13 @@ describe("changing the idle group playback target", () => {
         api.queues.foreign = playerQueue({ queue_id: "foreign", items: 11 });
         api.players[member].synced_to = "foreign";
         api.players[member].active_source = "foreign";
+      } else if (change === "own_group") {
+        api.players.foreign = createPlayer({
+          player_id: "foreign",
+          synced_to: member,
+          active_source: member,
+        });
+        api.players[member].group_members = [member, "foreign"];
       } else if (change === "queue") {
         api.queues[member].state = PlaybackState.PLAYING;
       } else {
@@ -1052,7 +1215,7 @@ describe("changing the idle group playback target", () => {
     },
   );
 
-  it.each(["playing", "other_group"])(
+  it.each(["playing", "other_group", "own_group"])(
     "keeps the acknowledged target but skips regroup after a follower becomes %s",
     async (change) => {
       const { wrapper } = mountPlayerControls();
@@ -1072,6 +1235,13 @@ describe("changing the idle group playback target", () => {
       if (change === "playing") {
         api.players.other.playback_state = PlaybackState.PLAYING;
         api.queues.other.state = PlaybackState.PLAYING;
+      } else if (change === "own_group") {
+        api.players.foreign = createPlayer({
+          player_id: "foreign",
+          synced_to: "other",
+          active_source: "other",
+        });
+        api.players.other.group_members = ["other", "foreign"];
       } else {
         api.players.foreign = createPlayer({
           player_id: "foreign",
@@ -1095,7 +1265,10 @@ describe("changing the idle group playback target", () => {
       expect(api.queues.leader.items).toBe(0);
       expect(api.queues.other.items).toBe(5);
       expect(api.players.other.synced_to).toBe(
-        change === "playing" ? null : "foreign",
+        change === "other_group" ? "foreign" : null,
+      );
+      expect(toast.error).toHaveBeenCalledExactlyOnceWith(
+        "player_group_playback.queue_moved_regroup_failed",
       );
     },
   );
