@@ -293,7 +293,8 @@ describe("changing the idle group playback target", () => {
   ])(
     "keeps $control usable during the existing Keep playing handoff",
     async ({ state, stop }) => {
-      const { wrapper, leader } = mountPlayerControls();
+      const { wrapper } = mountPlayerControls();
+      const leader = api.players.leader;
       leader.playback_state = state;
       api.queues.leader.state = state;
       if (stop) {
@@ -335,9 +336,9 @@ describe("changing the idle group playback target", () => {
         ["leader"],
       );
       expect(api.sendCommand).not.toHaveBeenCalled();
-      expect(
-        wrapper.get(".play-btn-icon").attributes("disabled"),
-      ).toBeUndefined();
+      expect(wrapper.get(".play-btn-icon").attributes("disabled")).toBe(
+        "false",
+      );
       expect(wrapper.find(".play-btn-spinner").exists()).toBe(false);
       await wrapper.get(".play-btn-icon").trigger("click");
       if (stop) {
