@@ -19,7 +19,7 @@ permissions:
 env:
   NODE_VERSION: "22.x"
   PYTHON_VERSION: "3.12"
-  SOURCE_SHA: "bf31840615c865db83655c5d36ce209886d60816"
+  SOURCE_SHA: "4ed8be68f37146371eff8e458e046303d58a809b"
   BASE_SOURCE_SHA: "1514734b4c4517a63a195088b63789af16692f3a"
   SOURCE_PACKAGE_VERSION: "0.0.0"
 
@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SOURCE_SHA }}
-          fetch-depth: 10
+          fetch-depth: 11
           persist-credentials: false
 
       - name: Set up Python ${{ env.PYTHON_VERSION }}

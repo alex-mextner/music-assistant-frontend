@@ -19,7 +19,7 @@ concurrency:
 env:
   NODE_VERSION: "22.x"
   PYTHON_VERSION: "3.12"
-  SOURCE_SHA: "8607ed51e2b58faeeb95d0c45672d30b8334ecaf"
+  SOURCE_SHA: "a520cdc4d6856a0084aa7feee05508c3650b433b"
   BUILD_MODE: final
   BASE_FRONTEND_VERSION: "2.17.297"
   BASE_SOURCE_SHA: "e779b9d359e47cd210c2801f16a0ce6263571903"
@@ -80,6 +80,15 @@ jobs:
       - name: Check TypeScript before full tests
         if: env.BUILD_MODE == 'final'
         run: pnpm exec vue-tsc --noEmit
+        env:
+          CI: true
+
+      - name: Check affected interactions before full tests
+        if: env.BUILD_MODE == 'final'
+        run: >-
+          pnpm test:run
+          tests/components/PlayerGroupMembersTransfer.test.ts
+          tests/plugins/api/index.test.ts
         env:
           CI: true
 
