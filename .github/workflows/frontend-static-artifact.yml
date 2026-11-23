@@ -19,8 +19,8 @@ concurrency:
 env:
   NODE_VERSION: "22.x"
   PYTHON_VERSION: "3.12"
-  SOURCE_SHA: "f329b7d47edc336e58079bf5093e805d959e9072"
-  BUILD_MODE: final
+  SOURCE_SHA: "5cf73871721a81881e858f9ed0a5bed6cbd38d58"
+  BUILD_MODE: focused-red
   BASE_FRONTEND_VERSION: "2.17.297"
   BASE_SOURCE_SHA: "e779b9d359e47cd210c2801f16a0ce6263571903"
 
@@ -70,7 +70,11 @@ jobs:
 
       - name: Run focused regression against unchanged production code
         if: env.BUILD_MODE == 'focused-red'
-        run: pnpm test:run tests/components/PlayerGroupMembersTransfer.test.ts
+        run: >-
+          pnpm test:run
+          tests/components/PlayerGroupMembersTransfer.test.ts
+          tests/components/PlayerCard.test.ts
+          tests/plugins/api/index.test.ts
         env:
           CI: true
 
