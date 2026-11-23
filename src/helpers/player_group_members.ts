@@ -85,7 +85,6 @@ async function waitForGroupLeader(memberIds: string[]): Promise<Player> {
   // using the same player events as the active-playback transfer observer.
   return new Promise((resolve, reject) => {
     let finished = false;
-    let unsubscribe: (() => void) | undefined;
     const finish = (target?: Player) => {
       if (finished) return;
       finished = true;
@@ -103,7 +102,7 @@ async function waitForGroupLeader(memberIds: string[]): Promise<Player> {
       if (target) finish(target);
     };
     const timeout = setTimeout(() => finish(), 5000);
-    unsubscribe = api.subscribe_multi(
+    const unsubscribe = api.subscribe_multi(
       [
         EventType.PLAYER_UPDATED,
         EventType.PLAYER_REMOVED,
