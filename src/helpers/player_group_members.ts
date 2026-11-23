@@ -16,6 +16,8 @@ import { toast } from "vue-sonner";
 export { pendingGroupTransfers } from "./player_group_transfer_state";
 
 interface MemberUpdate {
+  sourceId: string;
+  pendingAdditions: string[];
   playerIds: Set<string>;
   promise: Promise<void>;
 }
@@ -70,7 +72,8 @@ function canUseIdleMember(
     (!queue || queue.state === PlaybackState.IDLE) &&
     (explicitlyAdded ||
       ((!member.synced_to || member.synced_to === sourceId) &&
-        (!member.active_group || member.active_group === sourceId)))
+        (!member.active_group || member.active_group === sourceId) &&
+        member.group_members.every((id) => id === memberId || id === sourceId)))
   );
 }
 
@@ -78,6 +81,7 @@ function requireIdleMembers(
   sourceId: string,
   memberIds: string[],
   additions: string[],
+  errorKey = "player_group_playback.regroup_unavailable",
 ): void {
   const unchanged = memberIds.every(
     (id) =>
@@ -85,7 +89,7 @@ function requireIdleMembers(
       canUseIdleMember(id, sourceId, additions.includes(id)),
   );
   if (unchanged) return;
-  toast.error($t("player_group_playback.regroup_unavailable"));
+  toast.error($t(errorKey));
   throw new Error("A group member changed during the queue handoff");
 }
 
@@ -193,13 +197,13 @@ export function setPlayerGroupMembers(
     ...playerIdsToRemove,
   ]);
   const requestPlayerIds = [...playerIds];
-  const dependencies = new Set<Promise<void>>();
+  const dependencies = new Set<MemberUpdate>();
   // Include still-pending additions even if a server snapshot has not caught up.
   // Only intersecting operations wait; unrelated rooms remain independent.
   for (const id of playerIds) {
     const previous = memberUpdates.get(id);
     if (!previous) continue;
-    dependencies.add(previous.promise);
+    dependencies.add(previous);
     for (const previousId of previous.playerIds) playerIds.add(previousId);
   }
   if (requestPlayerIds.some((id) => pendingGroupTransfers.has(id))) {
@@ -207,6 +211,16 @@ export function setPlayerGroupMembers(
     return restorePlayer().catch(() => undefined);
   }
 
+  // Earlier batches may still be adding an idle member to this same source.
+  // Preserve that intent at capture; execution checks the observed ownership.
+  const pendingAdditions = [
+    ...new Set([
+      ...playerIdsToAdd,
+      ...[...dependencies]
+        .filter((update) => update.sourceId === playerId)
+        .flatMap((update) => update.pendingAdditions),
+    ]),
+  ];
   const remainingMemberIds = [
     ...new Set([...desiredMemberIds, ...playerIdsToAdd]),
   ].filter(
@@ -222,7 +236,7 @@ export function setPlayerGroupMembers(
   const owner = Symbol(playerId);
   if (idleHandoff) {
     try {
-      requireIdleMembers(playerId, remainingMemberIds, playerIdsToAdd);
+      requireIdleMembers(playerId, remainingMemberIds, pendingAdditions);
     } catch {
       return restorePlayer().catch(() => undefined);
     }
@@ -235,7 +249,12 @@ export function setPlayerGroupMembers(
     );
     for (const id of reservationIds) pendingGroupTransfers.set(id, owner);
   }
-  const update: MemberUpdate = { playerIds, promise: Promise.resolve() };
+  const update: MemberUpdate = {
+    sourceId: playerId,
+    pendingAdditions,
+    playerIds,
+    promise: Promise.resolve(),
+  };
   const execute = () =>
     applyGroupMemberUpdate(
       playerId,
@@ -254,7 +273,9 @@ export function setPlayerGroupMembers(
         }
       });
   update.promise = dependencies.size
-    ? Promise.all(dependencies).then(execute)
+    ? Promise.all(
+        [...dependencies].map((dependency) => dependency.promise),
+      ).then(execute)
     : execute();
   for (const id of playerIds) memberUpdates.set(id, update);
   return update.promise;
@@ -332,7 +353,12 @@ async function applyGroupMemberUpdate(
       (memberId) => memberId !== targetId && api.players[memberId]?.available,
     );
     if (followers.length) {
-      requireIdleMembers(playerId, remainingMemberIds, playerIdsToAdd);
+      requireIdleMembers(
+        playerId,
+        remainingMemberIds,
+        playerIdsToAdd,
+        "player_group_playback.queue_moved_regroup_failed",
+      );
       await api.playerCommandSetMembers(targetId, followers);
     }
   } finally {
