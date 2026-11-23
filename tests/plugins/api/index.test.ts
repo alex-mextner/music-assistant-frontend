@@ -456,6 +456,7 @@ describe("playback commands during a group handoff", () => {
       transport.receive({
         message_id: command.message_id,
         result: command.command === "time" ? Date.now() / 1000 : null,
+        partial: false,
       });
     }
     await request;
