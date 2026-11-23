@@ -313,7 +313,8 @@ describe("changing the idle group playback target", () => {
   ])(
     "keeps $control usable during the existing Keep playing handoff",
     async ({ state, stop, label }) => {
-      const { wrapper, leader } = mountPlayerControls();
+      const { wrapper } = mountPlayerControls();
+      const leader = api.players.leader;
       leader.playback_state = state;
       api.queues.leader.state = state;
       if (stop) {
