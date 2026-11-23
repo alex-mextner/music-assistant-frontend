@@ -12,8 +12,7 @@ import { pendingGroupTransfers } from "@/helpers/player_group_members";
 
 type PlayerRef = ComputedRef<Player | undefined> | Ref<Player | undefined>;
 type PlayerQueueRef =
-  | ComputedRef<PlayerQueue | undefined>
-  | Ref<PlayerQueue | undefined>;
+  ComputedRef<PlayerQueue | undefined> | Ref<PlayerQueue | undefined>;
 
 // Shared by the play button and the spacebar shortcut so they always agree.
 export function usePlayPauseCommand(

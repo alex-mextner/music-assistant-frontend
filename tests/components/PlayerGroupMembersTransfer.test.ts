@@ -88,7 +88,10 @@ function createPlayer(overrides: Partial<Player> = {}): Player {
     volume_control: "volume",
     mute_control: "mute",
     needs_setup: false,
+    setup_reason: null,
     has_setup_flow: false,
+    legacy_ids: [],
+    protocols: [],
     output_protocols: [],
     active_output_protocol: null,
     elapsed_time: null,
@@ -99,6 +102,8 @@ function createPlayer(overrides: Partial<Player> = {}): Player {
     active_group: null,
     synced_to: null,
     sleep_timer_expires_at: null,
+    sleep_timer_mode: null,
+    active_source_audio: null,
     ...overrides,
   };
 }
