@@ -1,5 +1,6 @@
 import type { ContextMenuItem } from "@/helpers/context_menu_item";
 import api from "@/plugins/api";
+import { pendingGroupTransfers } from "@/helpers/player_group_transfer_state";
 import {
   getPlayerMenuItems,
   getPlayerSetupMenuItem,
@@ -17,7 +18,7 @@ import {
   type PlayerSource,
   RepeatMode,
 } from "@/plugins/api/interfaces";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { playerQueue } from "../fixtures/playerQueue";
 import { playerSource } from "../fixtures/playerSource";
 
@@ -57,6 +58,7 @@ const {
   storeMock: {
     showFullscreenPlayer: true,
     showPlayersMenu: true,
+    activePlayerId: "kitchen" as string | undefined,
   },
 }));
 
@@ -66,6 +68,7 @@ vi.mock("@/plugins/api", () => ({
     providers: {
       milkdrop_visualizer: { domain: "milkdrop_visualizer", available: true },
     },
+    queueCommandTransfer: vi.fn(),
     playerCommandShuffle: vi.fn(),
     playerCommandRepeat: vi.fn(),
   },
@@ -962,4 +965,45 @@ describe("shuffle and repeat", () => {
     expect(shown).not.toContain("shuffle_enable");
     expect(shown).not.toContain("select_repeat_mode");
   });
+});
+
+describe("queue transfer menu during a group handoff", () => {
+  afterEach(() => {
+    pendingGroupTransfers.clear();
+    api.players = {};
+  });
+
+  it.each(["kitchen", "other"])(
+    "keeps selection unchanged while the %s endpoint is reserved",
+    (reserved) => {
+      vi.mocked(api.queueCommandTransfer).mockClear();
+      storeMock.activePlayerId = "kitchen";
+      const source = makePlayer();
+      api.players.other = makePlayer({
+        player_id: "other",
+        name: "Office",
+        available: true,
+        synced_to: null,
+        hide_in_ui: false,
+        private: false,
+      });
+      const item = getPlayerMenuItems(
+        source,
+        makeQueue({ active: true, items: 1 }),
+      ).find((entry) => entry.label === "transfer_queue")?.subItems?.[0];
+      expect(item).toBeDefined();
+      pendingGroupTransfers.set(reserved, Symbol("handoff"));
+      item?.action?.();
+      expect(api.queueCommandTransfer).not.toHaveBeenCalled();
+      expect(storeMock.activePlayerId).toBe("kitchen");
+
+      pendingGroupTransfers.clear();
+      item?.action?.();
+      expect(api.queueCommandTransfer).toHaveBeenCalledExactlyOnceWith(
+        "kitchen",
+        "other",
+      );
+      expect(storeMock.activePlayerId).toBe("other");
+    },
+  );
 });

@@ -189,7 +189,8 @@ function isRequiredMember(player: Player) {
   }
   if (
     player.player_id === props.player.player_id &&
-    (desiredMembers.value?.length ?? props.members.length) <= 1
+    (desiredMembers.value?.filter((id) => api.players[id]?.available).length ??
+      props.members.length) <= 1
   ) {
     return true;
   }

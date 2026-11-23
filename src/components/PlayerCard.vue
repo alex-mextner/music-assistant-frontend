@@ -245,6 +245,7 @@ import {
   isBuiltinPlayer,
 } from "@/helpers/players";
 import { isQueueEnded } from "@/helpers/queue_position";
+import { pendingGroupTransfers } from "@/helpers/player_group_transfer_state";
 import { getMediaImageUrl, getPlayerName } from "@/helpers/utils";
 import api from "@/plugins/api";
 import { resolvePlayerQueue } from "@/plugins/api/helpers";
@@ -336,6 +337,7 @@ const canPlayPause = computed(
 
 const playActionInProgress = computed(
   () =>
+    pendingGroupTransfers.has(props.player.player_id) ||
     api.queues[props.player.player_id]?.extra_attributes
       ?.play_action_in_progress === true,
 );

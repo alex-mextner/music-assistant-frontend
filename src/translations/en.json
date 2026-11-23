@@ -1014,6 +1014,7 @@
         "power_off_message": "Playback is active on {0}. Powering it off will move the playback session to the remaining players.",
         "keep_playing": "Keep playing",
         "stop_and_ungroup": "Stop and ungroup",
+        "regroup_unavailable": "The remaining players could not form a group. The queue has not moved.",
         "change_pending": "A group change involving this player is still in progress. Please try again when it finishes.",
         "source_changed": "Playback changed while moving this queue. Please choose the player again."
     },

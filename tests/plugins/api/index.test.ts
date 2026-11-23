@@ -10,6 +10,8 @@ import {
 } from "@/plugins/api/interfaces";
 import { BaseTransport, TransportState } from "@/plugins/remote/transport";
 import { pendingGroupTransfers } from "@/helpers/player_group_members";
+import { store } from "@/plugins/store";
+import { playerQueue } from "../../fixtures/playerQueue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockToastError } = vi.hoisted(() => ({
@@ -427,12 +429,34 @@ describe("playback commands during a group handoff", () => {
     pendingGroupTransfers.set("leader", Symbol("handoff"));
   });
 
-  afterEach(() => pendingGroupTransfers.clear());
+  afterEach(() => {
+    api.disconnect();
+    pendingGroupTransfers.clear();
+    delete store.activePlayer;
+  });
+
+  function playbackCommands() {
+    return transport.sentCommands.filter(
+      (message) => message.command !== "time",
+    );
+  }
+
+  function expectNoPlaybackRequestPending() {
+    for (const id of api["commands"].keys()) {
+      const command = transport.sentCommands.find(
+        (message) => message.message_id === String(id),
+      );
+      expect(command?.command).toBe("time");
+    }
+  }
 
   async function acknowledge(request: Promise<void>) {
     for (const command of transport.sentCommands) {
       if (!command.message_id) throw new Error("Command has no message ID");
-      transport.receive({ message_id: command.message_id, result: null });
+      transport.receive({
+        message_id: command.message_id,
+        result: command.command === "time" ? Date.now() / 1000 : null,
+      });
     }
     await request;
   }
@@ -441,8 +465,8 @@ describe("playback commands during a group handoff", () => {
     "blocks the player %s command before transport dispatch",
     async (command) => {
       await acknowledge(api.playerCommand("leader", command));
-      expect(transport.sentCommands).toEqual([]);
-      expect(api["commands"].size).toBe(0);
+      expect(playbackCommands()).toEqual([]);
+      expectNoPlaybackRequestPending();
     },
   );
 
@@ -450,7 +474,7 @@ describe("playback commands during a group handoff", () => {
     "blocks the queue %s command before transport dispatch",
     (command) => {
       api.playerQueueCommand("leader", command);
-      expect(transport.sentCommands).toEqual([]);
+      expect(playbackCommands()).toEqual([]);
     },
   );
 
@@ -460,8 +484,45 @@ describe("playback commands during a group handoff", () => {
         queue_id: "leader",
       }),
     );
-    expect(transport.sentCommands).toEqual([]);
-    expect(api["commands"].size).toBe(0);
+    expect(playbackCommands()).toEqual([]);
+    expectNoPlaybackRequestPending();
+  });
+
+  it("blocks implicit Play through a reserved player's previous source", async () => {
+    pendingGroupTransfers.clear();
+    pendingGroupTransfers.set("child", Symbol("handoff"));
+    store.activePlayer = {
+      player_id: "child",
+      active_source: "foreign",
+    } as Player;
+    api.queues.foreign = playerQueue({ queue_id: "foreign" });
+    await acknowledge(api.playMedia("library://track/1"));
+    expect(playbackCommands()).toEqual([]);
+
+    await acknowledge(
+      api.playMedia("library://track/1", undefined, { queue_id: "foreign" }),
+    );
+    expect(playbackCommands()).toEqual([
+      expect.objectContaining({
+        command: "player_queues/play_media",
+        args: expect.objectContaining({ queue_id: "foreign" }),
+      }),
+    ]);
+  });
+
+  it("allows grouping and state reads needed by the handoff", async () => {
+    await acknowledge(
+      Promise.all([
+        api.playerCommandSetMembers("leader", undefined, ["child"]),
+        api.getPlayer("leader"),
+        api.getPlayerQueues(),
+      ]).then(() => undefined),
+    );
+    expect(playbackCommands().map((message) => message.command)).toEqual([
+      "players/cmd/set_members",
+      "players/get",
+      "player_queues/all",
+    ]);
   });
 
   it.each(["leader", "child"])(
@@ -470,7 +531,7 @@ describe("playback commands during a group handoff", () => {
       pendingGroupTransfers.clear();
       pendingGroupTransfers.set(reserved, Symbol("handoff"));
       api.queueCommandTransfer("leader", "child");
-      expect(transport.sentCommands).toEqual([]);
+      expect(playbackCommands()).toEqual([]);
     },
   );
 
@@ -482,10 +543,10 @@ describe("playback commands during a group handoff", () => {
         auto_play: false,
       }),
     );
-    expect(transport.sentCommands).toEqual([
+    expect(playbackCommands()).toEqual([
       expect.objectContaining({ command: "player_queues/transfer" }),
     ]);
-    expect(api["commands"].size).toBe(0);
+    expectNoPlaybackRequestPending();
   });
 
   it("keeps Stop, Pause, volume and an unrelated room usable", async () => {
@@ -497,7 +558,7 @@ describe("playback commands during a group handoff", () => {
         api.playerCommandPlay("other"),
       ]).then(() => undefined),
     );
-    expect(transport.sentCommands.map((message) => message.command)).toEqual([
+    expect(playbackCommands().map((message) => message.command)).toEqual([
       "players/cmd/stop",
       "players/cmd/pause",
       "players/cmd/volume_set",

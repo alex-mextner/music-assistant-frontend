@@ -1,4 +1,9 @@
 import { store } from "../store";
+import {
+  isGroupPlaybackBlocked,
+  isGroupTransferPending,
+  resolvePlayTarget,
+} from "@/helpers/player_group_transfer_state";
 
 import { computed, reactive, ref } from "vue";
 import { toast } from "vue-sonner";
@@ -1766,6 +1771,7 @@ export class MusicAssistantApi {
     /*
       Handle (throttled) command to player
     */
+    if (isGroupPlaybackBlocked(queue_id, command)) return;
     this._sendCommand(`player_queues/${command}`, {
       queue_id,
       ...args,
@@ -1777,6 +1783,7 @@ export class MusicAssistantApi {
     autoPlay?: boolean,
   ) {
     // Transfer queue to another queue.
+    if (isGroupTransferPending(sourceQueue, targetQueue)) return;
     this._sendCommand("player_queues/transfer", {
       source_queue_id: sourceQueue,
       target_queue_id: targetQueue,
@@ -2043,6 +2050,7 @@ export class MusicAssistantApi {
     /*
       Handle command to player
     */
+    if (isGroupPlaybackBlocked(player_id, command)) return Promise.resolve();
     return this.sendCommand(
       `players/cmd/${command}`,
       {
@@ -2152,18 +2160,10 @@ export class MusicAssistantApi {
     option?: QueueOption,
     options: PlayMediaOptions = {},
   ): Promise<void> {
-    let queue_id = options.queue_id;
-    if (
-      !queue_id &&
-      store.activePlayer?.active_source &&
-      store.activePlayer?.active_source in this.queues
-    ) {
-      queue_id = store.activePlayer?.active_source;
-    } else if (!queue_id) {
-      queue_id = store.activePlayer?.player_id;
-    }
+    const target = resolvePlayTarget(options, store.activePlayer, this.queues);
+    if (target.blocked) return Promise.resolve();
     return this.sendCommand("player_queues/play_media", {
-      queue_id,
+      queue_id: target.queueId,
       media,
       option,
       start_item: options.start_item,

@@ -2,16 +2,18 @@ import api from "@/plugins/api";
 import { resolvePlayerQueue } from "@/plugins/api/helpers";
 import {
   type Player,
+  type MassEvent,
+  EventType,
   PlaybackState,
+  PlayerFeature,
   PlayerType,
 } from "@/plugins/api/interfaces";
 import { $t } from "@/plugins/i18n";
 import { store } from "@/plugins/store";
-import { reactive } from "vue";
+import { pendingGroupTransfers } from "./player_group_transfer_state";
 import { toast } from "vue-sonner";
 
-// Incoming queue updates must not release an in-progress client handoff.
-export const pendingGroupTransfers = reactive(new Map<string, symbol>());
+export { pendingGroupTransfers } from "./player_group_transfer_state";
 
 interface MemberUpdate {
   playerIds: Set<string>;
@@ -53,6 +55,72 @@ function idleTransferTarget(
           member.type === PlayerType.STEREO_PAIR ||
           member.type === PlayerType.GROUP),
     );
+}
+
+function findGroupLeader(memberIds: string[]): Player | undefined {
+  const members = memberIds
+    .map((id) => api.players[id])
+    .filter((member) => member?.available);
+  return members.find(
+    (candidate) =>
+      (candidate.type === PlayerType.PLAYER ||
+        candidate.type === PlayerType.STEREO_PAIR ||
+        candidate.type === PlayerType.GROUP) &&
+      (members.length === 1 ||
+        (candidate.synced_to === null &&
+          !candidate.active_group &&
+          candidate.supported_features.includes(PlayerFeature.SET_MEMBERS) &&
+          members.every(
+            (member) =>
+              member.player_id === candidate.player_id ||
+              candidate.can_group_with.includes(member.player_id),
+          ))),
+  );
+}
+
+async function waitForGroupLeader(memberIds: string[]): Promise<Player> {
+  const ready = findGroupLeader(memberIds);
+  if (ready) return ready;
+  // Synced members expose an empty can_group_with. Wait for their freed state,
+  // using the same player events as the active-playback transfer observer.
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    let unsubscribe: (() => void) | undefined;
+    const finish = (target?: Player) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      unsubscribe?.();
+      if (target) resolve(target);
+      else reject(new Error("Remaining players cannot form a group"));
+    };
+    const check = (event?: MassEvent) => {
+      if (event?.event === EventType.DISCONNECTED) {
+        finish();
+        return;
+      }
+      const target = findGroupLeader(memberIds);
+      if (target) finish(target);
+    };
+    const timeout = setTimeout(() => finish(), 5000);
+    unsubscribe = api.subscribe_multi(
+      [
+        EventType.PLAYER_UPDATED,
+        EventType.PLAYER_REMOVED,
+        EventType.DISCONNECTED,
+      ],
+      check,
+    );
+    void Promise.allSettled(
+      memberIds
+        .filter((id) => api.players[id]?.available)
+        .map(async (id) => {
+          const player = await api.getPlayer(id);
+          if (!finished) api.players[id] = player;
+        }),
+    ).then(() => check());
+    check();
+  });
 }
 
 async function refreshTransferState(playerIds: string[]): Promise<void> {
@@ -165,7 +233,7 @@ async function applyGroupMemberUpdate(
     );
   }
 
-  const targetId = target.player_id;
+  let targetId = target.player_id;
   try {
     // Removing an idle leader dissolves its group and drops pending additions.
     // Free its followers without removing the leader or stopping its queue.
@@ -176,13 +244,17 @@ async function applyGroupMemberUpdate(
       await api.playerCommandSetMembers(playerId, undefined, previousMembers);
     }
 
+    try {
+      targetId = (await waitForGroupLeader(remainingMemberIds)).player_id;
+    } catch (error) {
+      toast.error($t("player_group_playback.regroup_unavailable"));
+      throw error;
+    }
+
     // Another client may have started playback while the detach was pending.
     if (
-      idleTransferTarget(
-        api.players[playerId],
-        remainingMemberIds,
-        playerIdsToRemove,
-      )?.player_id !== targetId
+      idleTransferTarget(api.players[playerId], [targetId], playerIdsToRemove)
+        ?.player_id !== targetId
     ) {
       sourceChanged();
     }
@@ -199,7 +271,7 @@ async function applyGroupMemberUpdate(
     // Once the queue moved, a regroup failure must leave that proven target
     // selected rather than returning to the now-empty source.
     const followers = remainingMemberIds.filter(
-      (memberId) => memberId !== targetId,
+      (memberId) => memberId !== targetId && api.players[memberId]?.available,
     );
     if (followers.length) {
       await api.playerCommandSetMembers(targetId, followers);
