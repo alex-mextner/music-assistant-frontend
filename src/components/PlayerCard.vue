@@ -240,6 +240,7 @@ import {
 import { isQueueEnded } from "@/helpers/queue_position";
 import { getMediaImageUrl } from "@/helpers/utils";
 import api from "@/plugins/api";
+import { pendingGroupTransfers } from "@/helpers/player_group_transfer_state";
 import { resolvePlayerQueue } from "@/plugins/api/helpers";
 import {
   PlaybackState,
@@ -358,6 +359,7 @@ const canPlayPause = computed(
 
 const playActionInProgress = computed(
   () =>
+    pendingGroupTransfers.has(props.player.player_id) ||
     api.queues[props.player.player_id]?.extra_attributes
       ?.play_action_in_progress === true,
 );

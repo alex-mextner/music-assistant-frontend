@@ -2111,6 +2111,11 @@ describe("playback commands during a group handoff", () => {
     const initialization = api.initialize(transport);
     transport.receive(SERVER_INFO);
     await initialization;
+    for (const command of transport.sentCommands) {
+      expect(["time", "translations/set_locale"]).toContain(command.command);
+    }
+    await acknowledge(Promise.resolve());
+    transport.sentCommands.length = 0;
     pendingGroupTransfers.set("leader", Symbol("handoff"));
   });
 
@@ -2176,14 +2181,17 @@ describe("playback commands during a group handoff", () => {
       settled = true;
     });
     await Promise.resolve();
-    expect(settled).toBe(false);
-    expect(playbackCommands()).toEqual([
-      expect.objectContaining({
-        command: "player_queues/play_index",
-        args: { queue_id: "other", index: 2 },
-      }),
-    ]);
-    await acknowledge(request);
+    try {
+      expect(settled).toBe(false);
+      expect(playbackCommands()).toEqual([
+        expect.objectContaining({
+          command: "player_queues/play_index",
+          args: { queue_id: "other", index: 2 },
+        }),
+      ]);
+    } finally {
+      await acknowledge(request);
+    }
     expect(settled).toBe(true);
   });
 

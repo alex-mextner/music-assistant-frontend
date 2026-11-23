@@ -1499,6 +1499,7 @@
         "stop_and_ungroup": "Stop and ungroup",
         "remove_message_this_device": "Playback is active on this device. Removing it from the group will move the playback session to the remaining players.",
         "power_off_message_this_device": "Playback is active on this device. Powering it off will move the playback session to the remaining players.",
+        "regroup_unavailable": "The remaining players could not form a group. The queue has not moved.",
         "change_pending": "A group change involving this player is still in progress. Please try again when it finishes.",
         "source_changed": "Playback changed while moving this queue. Please choose the player again."
     },

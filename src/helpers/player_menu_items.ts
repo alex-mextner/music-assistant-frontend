@@ -2,6 +2,7 @@
 // this menu is shown in the full screen player and in the player list
 import type { ContextMenuItem } from "@/helpers/context_menu_item";
 import api from "@/plugins/api";
+import { isGroupTransferPending } from "@/helpers/player_group_transfer_state";
 import {
   Player,
   PlayerFeature,
@@ -261,6 +262,8 @@ export const getPlayerMenuItems = (
               return;
             }
             try {
+              if (isGroupTransferPending(playerQueue!.queue_id, p.player_id))
+                return;
               api.queueCommandTransfer(playerQueue!.queue_id, p.player_id);
               store.activePlayerId = p.player_id;
             } catch {

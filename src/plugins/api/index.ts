@@ -1,4 +1,9 @@
 import { store } from "../store";
+import {
+  isGroupPlaybackBlocked,
+  isGroupTransferPending,
+  playMediaArgs,
+} from "@/helpers/player_group_transfer_state";
 
 import { computed, reactive, ref } from "vue";
 import { toast } from "vue-sonner";
@@ -2373,6 +2378,7 @@ export class MusicAssistantApi {
     index: number | string,
   ): Promise<void> {
     // Play item at index (or item_id) X in queue.
+    if (isGroupPlaybackBlocked(queueId, "play_index")) return Promise.resolve();
     return this.sendCommand("player_queues/play_index", {
       queue_id: queueId,
       index,
@@ -2490,6 +2496,7 @@ export class MusicAssistantApi {
     /*
       Handle (throttled) command to player
     */
+    if (isGroupPlaybackBlocked(queue_id, command)) return;
     this._sendCommand(`player_queues/${command}`, {
       queue_id,
       ...args,
@@ -2505,6 +2512,7 @@ export class MusicAssistantApi {
     autoPlay?: boolean,
   ) {
     // Transfer queue to another queue.
+    if (isGroupTransferPending(sourceQueue, targetQueue)) return;
     this._sendCommand("player_queues/transfer", {
       source_queue_id: sourceQueue,
       target_queue_id: targetQueue,
@@ -2778,6 +2786,7 @@ export class MusicAssistantApi {
     /*
       Handle command to player
     */
+    if (isGroupPlaybackBlocked(player_id, command)) return Promise.resolve();
     return this.sendCommand(
       `players/cmd/${command}`,
       {
@@ -3023,24 +3032,10 @@ export class MusicAssistantApi {
     option?: QueueOption,
     options: PlayMediaOptions = {},
   ): Promise<void> {
-    const payload = {
-      // a player's own queue id is its player id; the server routes a grouped
-      // or synced player's request to the queue that should handle it
-      queue_id: options.queue_id ?? store.activePlayer?.player_id,
-      media,
-      option,
-      start_item: options.start_item,
-      sort_by: options.sort_by,
-      sort_field: options.sort_field,
-      sort_direction: options.sort_direction,
-      shuffle: options.shuffle,
-      start_position: options.start_position,
-    };
-    return options.suppressGlobalError === undefined
-      ? this.sendCommand("player_queues/play_media", payload)
-      : this.sendCommand("player_queues/play_media", payload, {
-          suppressGlobalError: options.suppressGlobalError,
-        });
+    const args = playMediaArgs(media, option, options, store.activePlayer);
+    return args
+      ? this.sendCommand<void>("player_queues/play_media", ...args)
+      : Promise.resolve();
   }
 
   // ProviderConfig related functions
