@@ -1,0 +1,53 @@
+name: Focused upstream playback regressions
+
+# Fork-only RED evidence; final port validation has its own full native workflow.
+on:
+  push:
+    branches:
+      - ci/ma-frontend-static-artifact
+    paths:
+      - .github/workflows/frontend-upstream-focused-red.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-frontend-focused-red-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "22.x"
+  SOURCE_SHA: "2c7e637d967f204a164578a08aea9331403cb094"
+
+jobs:
+  focused-regressions:
+    if: github.repository == 'alex-mextner/music-assistant-frontend'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the immutable regression-only source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Verify exact source
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          printf 'Regression-only source: %s\n' "$SOURCE_SHA"
+
+      - uses: ./.github/actions/setup-frontend
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Run focused playback regressions
+        run: >-
+          pnpm test:run
+          tests/components/PlayerCard.test.ts
+          tests/components/PlayerGroupMembersTransfer.test.ts
+          tests/helpers/player_menu_items.test.ts
+          tests/plugins/api/index.test.ts
+        env:
+          CI: true
