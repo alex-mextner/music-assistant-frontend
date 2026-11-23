@@ -990,6 +990,7 @@ describe("queue transfer menu during a group handoff", () => {
       const item = getPlayerMenuItems(
         source,
         makeQueue({ active: true, items: 1 }),
+        { context: "queue" },
       ).find((entry) => entry.label === "transfer_queue")?.subItems?.[0];
       expect(item).toBeDefined();
       pendingGroupTransfers.set(reserved, Symbol("handoff"));
